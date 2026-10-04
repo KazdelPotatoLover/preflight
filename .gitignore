@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+.env
+.preflight/
+*.log
+playwright-report/
+test-results/

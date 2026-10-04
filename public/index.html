@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Preflight · 团队工作台</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Preflight 首页"
+          ><span class="brand-mark">↗</span>Preflight<span class="version"
+            >MVP</span
+          ></a
+        >
+        <div class="connection">
+          <span id="connection-dot" class="dot"></span
+          ><span id="connection">等待连接</span
+          ><button id="logout" class="quiet" hidden>退出</button>
+        </div>
+      </header>
+      <main>
+        <section id="login-panel" class="login" hidden>
+          <div class="eyebrow">TEAM COLLABORATION</div>
+          <h1>让每一步工作，<br />都带上团队上下文。</h1>
+          <p class="muted">Agent 共享目标、进展和发现。重要取舍，由你决定。</p>
+          <form id="login-form">
+            <label for="token">工作台访问令牌</label
+            ><input
+              id="token"
+              type="password"
+              autocomplete="off"
+              required
+              placeholder="输入人类成员的访问令牌"
+            /><button class="primary">连接团队</button>
+          </form>
+          <p class="small muted">
+            访问令牌仅用于本次登录，不保存在浏览器本地。
+          </p>
+        </section>
+        <section id="board" hidden>
+          <div class="heading">
+            <div>
+              <div class="eyebrow">TEAM WORKSPACE</div>
+              <h1>团队工作台</h1>
+              <p id="repo" class="muted"></p>
+            </div>
+            <div class="heading-actions">
+              <span id="updated" class="small muted"></span
+              ><button id="refresh" class="secondary">刷新</button
+              ><button id="new-goal" class="primary">＋ 登记目标</button>
+            </div>
+          </div>
+          <div id="metrics" class="metrics"></div>
+          <div class="columns">
+            <section class="work-section">
+              <div class="section-heading">
+                <h2>目标与工作</h2>
+                <span class="small muted">由团队 Agent 持续更新</span>
+              </div>
+              <div class="filters" role="group" aria-label="筛选工作">
+                <button class="active" data-filter="all">全部</button
+                ><button data-filter="active">进行中</button
+                ><button data-filter="waiting">等待决策</button
+                ><button data-filter="completed">已完成</button>
+              </div>
+              <div id="goals"></div>
+            </section>
+            <aside>
+              <div class="section-heading">
+                <h2>需要你决定</h2>
+                <span id="decision-count" class="count">0</span>
+              </div>
+              <div id="decisions"></div>
+              <div class="section-heading activity-heading">
+                <h2>最近动态</h2>
+              </div>
+              <div id="events" class="activity"></div>
+            </aside>
+          </div>
+          <p class="provenance">
+            进展、预估范围和验证由 Agent 上报。完成表示已报告通过验收，尚不代表
+            Git 合并或独立 CI 验证。
+          </p>
+        </section>
+        <p id="message" role="status" aria-live="polite" hidden></p>
+      </main>
+      <footer>
+        Air traffic control for coding agents.<span>Preflight / 0.1</span>
+      </footer>
+    </div>
+    <dialog id="goal-dialog">
+      <form id="goal-form">
+        <div class="section-heading">
+          <h2>登记团队目标</h2>
+          <button type="button" id="close-goal" class="quiet" aria-label="关闭">
+            ✕
+          </button>
+        </div>
+        <label for="goal-title">目标名称</label
+        ><input
+          id="goal-title"
+          name="title"
+          maxlength="200"
+          required
+          placeholder="例如：修复登录偶发超时"
+        /><label for="goal-objective">期望达到什么结果</label
+        ><textarea
+          id="goal-objective"
+          name="objective"
+          maxlength="2000"
+          required
+        ></textarea
+        ><label for="goal-acceptance">验收条件（每行一条）</label
+        ><textarea
+          id="goal-acceptance"
+          name="acceptance"
+          required
+          placeholder="公共接口保持兼容&#10;相关测试通过"
+        ></textarea
+        ><button class="primary">保存目标</button>
+      </form>
+    </dialog>
+  </body>
+</html>

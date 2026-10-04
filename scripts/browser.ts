@@ -1,0 +1,74 @@
+import assert from 'node:assert/strict';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { mkdir } from 'node:fs/promises';
+import { serve } from '@hono/node-server';
+import { chromium, type Browser } from 'playwright';
+import { eq, inArray } from 'drizzle-orm';
+import { createApp } from '../src/app.js';
+import { connectDatabase } from '../src/db/client.js';
+import * as t from '../src/db/schema.js';
+import { CollaborationService } from '../src/domain/service.js';
+import type { Credential } from '../src/config.js';
+
+if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
+const connection = connectDatabase(process.env.DATABASE_URL);
+const repo = `browser/${randomUUID()}`;
+const token = randomBytes(32).toString('hex');
+const actor = { member: 'browser-agent', role: 'agent' as const, repo };
+const credentials: Credential[] = [{ member: 'team-lead', role: 'human', repo,
+  token_hash: createHash('sha256').update(token).digest('hex'), expires_at: new Date(Date.now() + 600000).toISOString() }];
+const service = new CollaborationService(connection.db);
+const server = serve({ fetch: createApp({ service, credentials: () => credentials }).fetch, port: 0, hostname: '127.0.0.1' });
+if (!server.listening) await new Promise<void>(resolve => server.once('listening', resolve));
+const address = server.address();
+assert(address && typeof address !== 'string');
+let browser: Browser | undefined;
+try {
+  browser = await chromium.launch({ headless: true, executablePath: process.env.PREFLIGHT_CHROMIUM_PATH });
+  const { goal } = await service.execute(actor, 'preflight_register_goal', { request_id: randomUUID(), title: '修复登录超时', objective: '保持公共接口兼容', acceptance: ['相关测试通过'] }) as { goal: typeof t.goals.$inferSelect };
+  const work = await service.execute(actor, 'preflight_start_work', { request_id: randomUUID(), goal_id: goal.id, title: '调查登录异常', agent_type: 'browser-test', likely_scope: ['src/auth.ts'] }) as { change: t.Change; session_id: string };
+  await service.execute(actor, 'preflight_propose_decision', { request_id: randomUUID(), change_id: work.change.id, session_id: work.session_id, question: '是否调整公共错误格式？', context: '需要团队共同确认兼容边界', category: 'public_api_behavior', urgency: 'blocking', options: [{ label: 'A', description: '修改错误格式' }, { label: 'B', description: '保持兼容' }], recommendation: 'B' });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  const errors: string[] = [];
+  page.on('pageerror', e => errors.push(e.message));
+  await page.goto(`http://127.0.0.1:${address.port}`);
+  await page.locator('#login-panel').waitFor({ state: 'visible' });
+  await page.locator('#token').fill(token);
+  await page.getByRole('button', { name: '连接团队' }).click();
+  await page.locator('#board').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('.work .badge').innerText(), '等待决策');
+  await page.locator('input[type=radio]').nth(1).check();
+  await page.locator('textarea[name=resolution]').fill('维持对外接口兼容，仅调整内部实现');
+  await page.getByRole('button', { name: '确认裁决' }).click();
+  await page.locator('.resolved-note').waitFor({ state: 'visible' });
+  assert((await service.context(actor, work.change.id, work.session_id)).blocking === false);
+  await page.getByRole('button', { name: '＋ 登记目标' }).click();
+  await page.locator('#goal-title').fill('<img src=x onerror=alert(1)> 新的计划目标');
+  await page.locator('#goal-objective').fill('可以在没有 Agent 工作时保留计划');
+  await page.locator('#goal-acceptance').fill('满足验收标准');
+  await page.getByRole('button', { name: '保存目标' }).click();
+  await page.locator('#goal-dialog').waitFor({ state: 'hidden' });
+  await page.getByText('<img src=x onerror=alert(1)> 新的计划目标', { exact: true }).waitFor();
+  assert.equal(await page.locator('#goals img').count(), 0);
+  assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
+  await mkdir('.preflight/screenshots', { recursive: true });
+  await page.screenshot({ path: '.preflight/screenshots/board-desktop.png', fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Mobile board overflows horizontally');
+  await page.screenshot({ path: '.preflight/screenshots/board-mobile.png', fullPage: true });
+  await page.getByRole('button', { name: '退出', exact: true }).click();
+  await page.locator('#login-panel').waitFor({ state: 'visible' });
+  assert.deepEqual(errors, []);
+  console.log('✓ Real Chromium: human login, blocking work, decision resolution, planned goal, XSS escaping, private session, mobile layout and logout');
+} finally {
+  await browser?.close();
+  await new Promise<void>(resolve => server.close(() => resolve()));
+  await connection.db.transaction(async db => {
+    const decisionIds = (await db.select({ id: t.decisions.id }).from(t.decisions).where(eq(t.decisions.repo, repo))).map(r => r.id);
+    const changeIds = (await db.select({ id: t.changes.id }).from(t.changes).where(eq(t.changes.repo, repo))).map(r => r.id);
+    if (decisionIds.length) await db.delete(t.decisionImpacts).where(inArray(t.decisionImpacts.decision_id, decisionIds));
+    if (changeIds.length) await db.delete(t.changeSessions).where(inArray(t.changeSessions.change_id, changeIds));
+    for (const table of [t.findings, t.feedback, t.decisions, t.changes, t.sessions, t.goals, t.events, t.mutations]) await db.delete(table).where(eq(table.repo, repo));
+  });
+  await connection.client.end();
+}
