@@ -51,6 +51,29 @@ describe('collaboration boundaries', () => {
     expect(canonical({ b: 1, a: { y: 2, x: 3 } })).toBe(canonical({ a: { x: 3, y: 2 }, b: 1 }));
     expect(canonical({ values: [1, 2] })).not.toBe(canonical({ values: [2, 1] }));
   });
+  it('requires explicit accept options and all three review evidence summaries', () => {
+    const input = { request_id: randomUUID(), change_id: randomUUID(), session_id: randomUUID(), decision_id: randomUUID(),
+      expected_version: 1, stance: 'accept', option_id: randomUUID(), rationale: 'Reviewed against the goal',
+      evidence: { goal_alignment: 'Matches goal', constraints_check: 'Checked boundaries', verification: 'Actual tests passed' } };
+    expect(schemas.preflight_review_decision.safeParse(input).success).toBe(true);
+    expect(schemas.preflight_review_decision.safeParse({ ...input, option_id: undefined }).success).toBe(false);
+    expect(schemas.preflight_review_decision.safeParse({ ...input, stance: 'object', option_id: undefined }).success).toBe(true);
+    for (const key of ['goal_alignment', 'constraints_check', 'verification']) {
+      expect(schemas.preflight_review_decision.safeParse({ ...input, evidence: { ...input.evidence, [key]: '  ' } }).success).toBe(false);
+    }
+    expect(schemas.preflight_review_decision.safeParse({ ...input, vote_for_member: 'bob' }).success).toBe(false);
+  });
+  it('defaults engineering proposals to within-goal coordination and validates isolation evidence', () => {
+    const proposal = { request_id: randomUUID(), change_id: randomUUID(), session_id: randomUUID(), question: 'Choose an approach', context: 'Within existing requirements',
+      category: 'product_behavior', urgency: 'blocking', options: [{ label: 'A', description: 'First approach' }, { label: 'B', description: 'Second approach' }] };
+    expect(schemas.preflight_propose_decision.parse(proposal).authority).toBe('within_goal');
+    expect(schemas.preflight_propose_decision.safeParse({ ...proposal, authority: 'human_required' }).success).toBe(false);
+    const progress = { request_id: randomUUID(), change_id: randomUUID(), session_id: randomUUID(), expected_version: 1, status: 'completed', summary: 'Finished',
+      verification: { head_sha: 'a'.repeat(40), command: 'npm test', result: 'passed', criteria: [{ index: 0, passed: true, evidence: 'Actual evidence' }],
+        isolated_decisions: [{ decision_id: randomUUID(), mitigation: 'Limit disputed scope', evidence: 'Boundary test passed' }] } };
+    expect(schemas.preflight_report_progress.safeParse(progress).success).toBe(true);
+    expect(schemas.preflight_report_progress.safeParse({ ...progress, verification: { ...progress.verification, isolated_decisions: [{ ...progress.verification.isolated_decisions[0], mitigation: '' }] } }).success).toBe(false);
+  });
   it('rejects expired or mismatched tokens', () => {
     const token = 'private-test-token';
     const credential = { member: 'alice', role: 'agent' as const, repo: 'test/repo', token_hash: createHash('sha256').update(token).digest('hex'), expires_at: new Date(Date.now() + 100000).toISOString() };

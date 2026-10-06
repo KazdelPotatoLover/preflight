@@ -1,5 +1,6 @@
 import { pgTable, uuid, text, integer, jsonb, timestamp, primaryKey, index, uniqueIndex } from 'drizzle-orm/pg-core';
-import type { Verification } from '../domain/contracts.js';
+import type { Verification, decisionEvidenceSchema } from '../domain/contracts.js';
+import type { z } from 'zod';
 const identity = () => ({ id: uuid('id').primaryKey(), repo: text('repo').notNull(), created_at: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow() });
 export const goals = pgTable('goals', {
   ...identity(), title: text('title').notNull(), objective: text('objective').notNull(),
@@ -28,11 +29,20 @@ export const findings = pgTable('findings', {
 export type DecisionOption = { id: string; label: string; description: string; pros: string[]; cons: string[] };
 export const decisions = pgTable('decisions', {
   ...identity(), question: text('question').notNull(), context: text('context').notNull(), category: text('category').notNull(),
-  urgency: text('urgency').notNull(), status: text('status').notNull().default('pending'),
+  urgency: text('urgency').notNull(), status: text('status').notNull().default('negotiating'),
+  authority: text('authority').notNull().default('within_goal'), review_round: integer('review_round').notNull().default(1),
+  review_epoch: integer('review_epoch').notNull().default(1),
   options: jsonb('options').$type<DecisionOption[]>().notNull(), recommendation: text('recommendation'),
   raised_by: text('raised_by').notNull(), option_id: uuid('option_id'), resolution: text('resolution'), resolved_by: text('resolved_by'),
   resolved_at: timestamp('resolved_at', { withTimezone: true, mode: 'string' }), version: integer('version').notNull().default(1),
 });
+export const decisionReviews = pgTable('decision_reviews', {
+  ...identity(), decision_id: uuid('decision_id').notNull().references(() => decisions.id),
+  review_epoch: integer('review_epoch').notNull(), review_round: integer('review_round').notNull(),
+  change_id: uuid('change_id').notNull().references(() => changes.id), session_id: uuid('session_id').notNull().references(() => sessions.id),
+  member: text('member').notNull(), stance: text('stance').notNull(), option_id: uuid('option_id'),
+  rationale: text('rationale').notNull(), evidence: jsonb('evidence').$type<z.infer<typeof decisionEvidenceSchema>>().notNull(),
+}, t => [uniqueIndex('decision_reviews_round_change_idx').on(t.decision_id, t.review_epoch, t.review_round, t.change_id)]);
 export const decisionImpacts = pgTable('decision_impacts', {
   decision_id: uuid('decision_id').notNull().references(() => decisions.id), change_id: uuid('change_id').notNull().references(() => changes.id),
 }, t => [primaryKey({ columns: [t.decision_id, t.change_id] })]);

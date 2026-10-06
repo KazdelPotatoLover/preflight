@@ -15,7 +15,9 @@ export const verificationSchema = z.object({
   head_sha: z.string().regex(/^[0-9a-f]{40}$/i),
   command: text, result: z.enum(['passed', 'failed']),
   criteria: z.array(z.object({ index: z.number().int().min(0), passed: z.boolean(), evidence: text })).min(1).max(30),
+  isolated_decisions: z.array(z.object({ decision_id: id, mitigation: text, evidence: text }).strict()).max(100).optional(),
 });
+export const decisionEvidenceSchema = z.object({ goal_alignment: text, constraints_check: text, verification: text }).strict();
 export const schemas = {
   preflight_register_goal: z.object({ ...mutation,
     title: text.max(200), objective: text, acceptance: z.array(text.max(500)).min(1).max(30),
@@ -40,12 +42,17 @@ export const schemas = {
   preflight_propose_decision: z.object({ ...mutation,
     change_id: id, session_id: id, question: text.max(500), context: text,
     category: z.enum(['public_api_behavior', 'database_schema', 'auth_security', 'product_behavior', 'architecture_boundary', 'unknown']),
+    authority: z.enum(['within_goal', 'goal_boundary', 'missing_information']).default('within_goal'),
     urgency: z.enum(['blocking', 'normal', 'low']),
     options: z.array(z.object({ label: text.max(80), description: text,
       pros: z.array(text.max(500)).max(10).default([]), cons: z.array(text.max(500)).max(10).default([]),
     })).min(2).max(5).refine(opts => new Set(opts.map(o => o.label)).size === opts.length, 'Option labels must be unique'),
     recommendation: z.string().max(80).optional(), affected_change_ids: z.array(id).max(20).default([]),
   }).strict(),
+  preflight_review_decision: z.object({ ...mutation,
+    change_id: id, session_id: id, decision_id: id, expected_version: z.number().int().positive(),
+    stance: z.enum(['accept', 'object']), option_id: id.optional(), rationale: text, evidence: decisionEvidenceSchema,
+  }).strict().refine(data => data.stance !== 'accept' || data.option_id !== undefined, 'Accept requires an option ID'),
   preflight_get_project: z.object({}).strict(),
   resolve_decision: z.object({ ...mutation, decision_id: id,
     expected_version: z.number().int().positive(), option_id: id, resolution: text,
