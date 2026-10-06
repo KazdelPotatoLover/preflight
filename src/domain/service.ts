@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { and, eq, inArray, desc, sql } from 'drizzle-orm';
+import { z } from 'zod';
 import type { Database, QueryDatabase } from '../db/client.js';
 import * as t from '../db/schema.js';
 import { canonical, DomainError, redact, schemas, type Action, type Actor } from './contracts.js';
@@ -224,6 +225,24 @@ export class CollaborationService {
           pending_decisions: decisions.filter(d => d.status === 'pending').length, completed_changes: changes.filter(c => c.status === 'completed').length },
         limits: { goals: 200, changes: 500, decisions: 200, events: 30 },
       };
+    }, { isolationLevel: 'repeatable read', accessMode: 'read only' });
+  }
+  async readFindings(actor: Actor, raw: unknown) {
+    const query = z.discriminatedUnion('scope', [
+      z.object({ scope: z.literal('repo') }).strict(),
+      z.object({ scope: z.literal('change'), change_id: z.uuid() }).strict(),
+    ]).parse(raw);
+    return this.db.transaction(async db => {
+      if (query.scope === 'change') await this.change(db, actor, query.change_id);
+      const rows = await db.select({ finding: t.findings, change_title: t.changes.title,
+        member: t.sessions.member, agent_type: t.sessions.agent_type }).from(t.findings)
+        .innerJoin(t.changes, and(eq(t.findings.change_id, t.changes.id), eq(t.changes.repo, actor.repo)))
+        .innerJoin(t.sessions, and(eq(t.findings.session_id, t.sessions.id), eq(t.sessions.repo, actor.repo)))
+        .where(and(eq(t.findings.repo, actor.repo), query.scope === 'change' ? eq(t.findings.change_id, query.change_id) : undefined))
+        .orderBy(desc(t.findings.created_at), desc(t.findings.id)).limit(101);
+      return { findings: rows.slice(0, 100).map(({ finding, ...source }) => ({ ...finding, ...source })),
+        scope: query.scope, change_id: query.scope === 'change' ? query.change_id : null,
+        limit: 100, truncated: rows.length > 100 };
     }, { isolationLevel: 'repeatable read', accessMode: 'read only' });
   }
 }

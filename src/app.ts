@@ -69,6 +69,10 @@ export function createApp(options: AppOptions) {
   app.use('/api/*', authenticateRequest);
   app.use('/mcp', authenticateRequest);
   app.get('/api/v1/atlas', async c => c.json({ data: await options.service.project(c.get('actor')), meta: { request_id: c.get('requestId') } }));
+  app.get('/api/v1/findings', async c => {
+    if (Object.values(c.req.queries()).some(values => values.length !== 1)) throw new DomainError('VALIDATION_ERROR', 'Query parameters must occur once');
+    return c.json({ data: await options.service.readFindings(c.get('actor'), c.req.query()), meta: { request_id: c.get('requestId') } });
+  });
   app.get('/api/v1/context', async c => c.json({ data: await options.service.execute(c.get('actor'), 'preflight_get_context', c.req.query()), meta: { request_id: c.get('requestId') } }));
   app.post('/api/v1/tools/:action', async c => {
     const action = c.req.param('action');

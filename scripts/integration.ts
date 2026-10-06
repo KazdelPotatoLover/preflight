@@ -3,7 +3,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { serve } from '@hono/node-server';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { eq, inArray } from 'drizzle-orm';
+import { inArray } from 'drizzle-orm';
 import { createApp } from '../src/app.js';
 import { connectDatabase } from '../src/db/client.js';
 import { migrate } from '../src/db/migrate.js';
@@ -30,6 +30,8 @@ const base = `http://127.0.0.1:${address.port}`;
 const clients = [new Client({ name: 'alice-client', version: '1.0' }), new Client({ name: 'bob-client', version: '1.0' })];
 type Work = { session_id: string; change: t.Change; related_work: { change_id: string; relation: string; evidence: unknown[] }[] };
 type Decision = typeof t.decisions.$inferSelect;
+type FindingsView = { findings: (typeof t.findings.$inferSelect & { change_title: string; member: string; agent_type: string })[];
+  scope: string; change_id: string | null; limit: number; truncated: boolean };
 async function call<T>(client: Client, name: string, args: Record<string, unknown> = {}): Promise<T> {
   const result = await client.callTool({ name, arguments: args });
   assert(!result.isError, JSON.stringify(result.content));
@@ -51,6 +53,13 @@ try {
   const tools = await alice.listTools();
   assert.equal(tools.tools.length, 7);
   assert(!tools.tools.some(tool => tool.name.includes('resolve')));
+  assert.equal((await request('/api/v1/findings?scope=repo', undefined)).status, 401);
+  const emptyFindings = await request('/api/v1/findings?scope=repo', secrets[0]);
+  assert.equal(emptyFindings.status, 200);
+  assert.deepEqual((await emptyFindings.json() as { data: FindingsView }).data, { findings: [], scope: 'repo', change_id: null, limit: 100, truncated: false });
+  for (const query of ['', '?scope=unknown', '?scope=change', '?scope=change&change_id=invalid', '?scope=repo&change_id=' + randomUUID(), '?scope=repo&repo=foreign', '?scope=repo&scope=change']) {
+    assert.equal((await request('/api/v1/findings' + query, secrets[0])).status, 400, query);
+  }
   console.log('✓ Two independent authenticated clients initialize and discover seven real MCP tools');
   const goalInput = { request_id: randomUUID(), title: 'Fix login timeout', objective: 'Keep login backward compatible', acceptance: ['Tests pass', 'Public API is unchanged'] };
   const goals = await Promise.all([call<{ goal: typeof t.goals.$inferSelect }>(alice, 'preflight_register_goal', goalInput), call<{ goal: typeof t.goals.$inferSelect }>(alice, 'preflight_register_goal', goalInput)]);
@@ -65,6 +74,32 @@ try {
   let context = await call<{ findings: { content: string }[]; pending_decisions: Decision[]; resolved_decisions: Decision[]; blocking: boolean; current_change: t.Change }>(bob, 'preflight_get_context', { change_id: b.change.id, session_id: b.session_id });
   assert(context.findings.some(f => f.content.includes('TimeoutError')));
   assert(!JSON.stringify(context).includes('do-not-store-this'));
+  const scopedResponse = await request('/api/v1/findings?scope=change&change_id=' + a.change.id, secrets[1]);
+  assert.equal(scopedResponse.status, 200);
+  const scoped = (await scopedResponse.json() as { data: FindingsView }).data;
+  assert.equal(scoped.scope, 'change');
+  assert.equal(scoped.change_id, a.change.id);
+  assert.equal(scoped.findings.length, 1);
+  assert.equal(scoped.findings[0]?.session_id, a.session_id);
+  assert.equal(scoped.findings[0]?.change_title, a.change.title);
+  assert.equal(scoped.findings[0]?.member, 'alice');
+  assert.equal(scoped.findings[0]?.agent_type, 'client-a');
+  assert.equal(scoped.findings[0]?.confidence, 0.9);
+  assert(!JSON.stringify(scoped).includes('do-not-store-this'));
+  const foreignGoalResponse = await request('/api/v1/tools/preflight_register_goal', secrets[3], { request_id: randomUUID(), title: 'Foreign goal', objective: 'Isolate findings', acceptance: ['No leak'] });
+  assert.equal(foreignGoalResponse.status, 200);
+  const foreignGoal = (await foreignGoalResponse.json() as { data: { goal: typeof t.goals.$inferSelect } }).data.goal;
+  const foreignWorkResponse = await request('/api/v1/tools/preflight_start_work', secrets[3], { request_id: randomUUID(), goal_id: foreignGoal.id, title: 'Foreign work', agent_type: 'outsider' });
+  assert.equal(foreignWorkResponse.status, 200);
+  const foreign = (await foreignWorkResponse.json() as { data: Work }).data;
+  assert.equal((await request('/api/v1/tools/preflight_publish_findings', secrets[3], { request_id: randomUUID(), change_id: foreign.change.id, session_id: foreign.session_id, findings: [{ kind: 'observation', content: 'ForeignFindingMarker', confidence: 0.4 }] })).status, 200);
+  assert.equal((await request('/api/v1/findings?scope=change&change_id=' + foreign.change.id, secrets[0])).status, 404);
+  assert.equal((await request('/api/v1/findings?scope=change&change_id=' + a.change.id, secrets[3])).status, 404);
+  const foreignView = (await (await request('/api/v1/findings?scope=repo', secrets[3])).json() as { data: FindingsView }).data;
+  assert.equal(foreignView.findings.length, 1);
+  assert.equal(foreignView.findings[0]?.content, 'ForeignFindingMarker');
+  assert(!JSON.stringify((await (await request('/api/v1/findings?scope=repo', secrets[0])).json())).includes('ForeignFindingMarker'));
+  console.log('✓ Explicit Findings scopes validate input, preserve confidence/source and isolate real foreign-repository findings');
   const discoveryGoal = await call<{ goal: typeof t.goals.$inferSelect }>(alice, 'preflight_register_goal', { request_id: randomUUID(), title: 'Shared goal discovery', objective: 'Find distinct work', acceptance: ['Findings visible'] });
   const source = await call<Work>(alice, 'preflight_start_work', { request_id: randomUUID(), goal_id: discoveryGoal.goal.id, title: 'backend database', agent_type: 'client-a', likely_scope: ['src/domain/service.ts'] });
   await call(alice, 'preflight_publish_findings', { request_id: randomUUID(), change_id: source.change.id, session_id: source.session_id, findings: [{ kind: 'observation', content: 'SameGoalDiscovery', confidence: 1 }] });
@@ -133,6 +168,30 @@ try {
   assert.equal(board.summary.completed_changes, 2);
   assert.equal(board.goals.find(g => g.id === goal.id)?.progress, 'reported_completed');
   assert.equal(board.events.filter(e => e.action === 'decision.resolved').length, 2);
+  const historical = (await (await request('/api/v1/findings?scope=repo', secrets[0])).json() as { data: FindingsView }).data;
+  assert.deepEqual((await (await request('/api/v1/findings?scope=repo', undefined, undefined, { Cookie: cookie })).json() as { data: FindingsView }).data, historical);
+  assert(historical.findings.some(f => f.change_id === a.change.id), 'Completed work findings remain readable');
+  assert(historical.findings.some(f => f.change_id === source.change.id), 'Abandoned work findings remain readable');
+  for (let batch = 0; batch < 4; batch++) await call(alice, 'preflight_publish_findings', { request_id: randomUUID(), change_id: source.change.id, session_id: source.session_id,
+    findings: Array.from({ length: 20 }, (_, index) => ({ kind: 'test_result', content: `Bounded finding ${batch}-${index}`, confidence: 1 })) });
+  await call(alice, 'preflight_publish_findings', { request_id: randomUUID(), change_id: source.change.id, session_id: source.session_id,
+    findings: Array.from({ length: 19 }, (_, index) => ({ kind: 'test_result', content: `Limit boundary ${index}`, confidence: 1 })) });
+  const exactLimit = (await (await request('/api/v1/findings?scope=change&change_id=' + source.change.id, secrets[0])).json() as { data: FindingsView }).data;
+  assert.equal(exactLimit.findings.length, 100);
+  assert.equal(exactLimit.truncated, false);
+  await call(alice, 'preflight_publish_findings', { request_id: randomUUID(), change_id: source.change.id, session_id: source.session_id, findings: [{ kind: 'test_result', content: 'One beyond limit', confidence: 1 }] });
+  const bounded = (await (await request('/api/v1/findings?scope=change&change_id=' + source.change.id, secrets[0])).json() as { data: FindingsView }).data;
+  assert.equal(bounded.findings.length, 100);
+  assert.equal(bounded.limit, 100);
+  assert.equal(bounded.truncated, true);
+  assert(bounded.findings.every(f => f.change_id === source.change.id && f.member === 'alice'));
+  for (let i = 1; i < bounded.findings.length; i++) {
+    const before = bounded.findings[i - 1]!, after = bounded.findings[i]!;
+    assert(before.created_at > after.created_at || (before.created_at === after.created_at && before.id > after.id));
+  }
+  assert.deepEqual((await (await request('/api/v1/findings?scope=change&change_id=' + source.change.id, secrets[0])).json() as { data: FindingsView }).data, bounded);
+  assert.equal((await request('/api/v1/findings?scope=repo', secrets[0], undefined, { Origin: 'https://malicious.example' })).status, 403);
+  console.log('✓ Historical Findings retained, deterministic 100-row cap and truncation exposed');
   assert.equal((await request('/api/v1/atlas', undefined)).status, 401);
   assert.equal((await request('/auth/login', undefined, [])).status, 400);
   assert.equal((await request('/api/v1/tools/preflight_register_goal', secrets[0], [])).status, 400);
@@ -150,18 +209,19 @@ try {
   await Promise.allSettled(clients.map(c => c.close()));
   await new Promise<void>(resolve => server.close(() => resolve()));
   await connection.db.transaction(async db => {
-    const decisionIds = (await db.select({ id: t.decisions.id }).from(t.decisions).where(eq(t.decisions.repo, repo))).map(r => r.id);
-    const changeIds = (await db.select({ id: t.changes.id }).from(t.changes).where(eq(t.changes.repo, repo))).map(r => r.id);
+    const testRepos = [repo, `${repo}-other`];
+    const decisionIds = (await db.select({ id: t.decisions.id }).from(t.decisions).where(inArray(t.decisions.repo, testRepos))).map(r => r.id);
+    const changeIds = (await db.select({ id: t.changes.id }).from(t.changes).where(inArray(t.changes.repo, testRepos))).map(r => r.id);
     if (decisionIds.length) await db.delete(t.decisionImpacts).where(inArray(t.decisionImpacts.decision_id, decisionIds));
     if (changeIds.length) await db.delete(t.changeSessions).where(inArray(t.changeSessions.change_id, changeIds));
-    await db.delete(t.findings).where(eq(t.findings.repo, repo));
-    await db.delete(t.feedback).where(eq(t.feedback.repo, repo));
-    await db.delete(t.decisions).where(eq(t.decisions.repo, repo));
-    await db.delete(t.changes).where(eq(t.changes.repo, repo));
-    await db.delete(t.sessions).where(eq(t.sessions.repo, repo));
-    await db.delete(t.goals).where(eq(t.goals.repo, repo));
-    await db.delete(t.events).where(eq(t.events.repo, repo));
-    await db.delete(t.mutations).where(eq(t.mutations.repo, repo));
+    await db.delete(t.findings).where(inArray(t.findings.repo, testRepos));
+    await db.delete(t.feedback).where(inArray(t.feedback.repo, testRepos));
+    await db.delete(t.decisions).where(inArray(t.decisions.repo, testRepos));
+    await db.delete(t.changes).where(inArray(t.changes.repo, testRepos));
+    await db.delete(t.sessions).where(inArray(t.sessions.repo, testRepos));
+    await db.delete(t.goals).where(inArray(t.goals.repo, testRepos));
+    await db.delete(t.events).where(inArray(t.events.repo, testRepos));
+    await db.delete(t.mutations).where(inArray(t.mutations.repo, testRepos));
   });
   await connection.client.end();
 }
