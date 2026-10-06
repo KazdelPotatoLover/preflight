@@ -166,7 +166,7 @@ MCP 成功响应同时带文本内容和 `structuredContent`：
 
 ## 7. 相关工作与上下文
 
-相关工作使用标题词项/中文 bigram、共享声明路径、错误指纹的确定性分数。最多返回 10 项活跃候选，附来源与证据；标题相似不会自动变成 `same_work`。`possible_duplicate` 需要共同路径与错误指纹，但仍是提示，不创建锁或合并身份。
+相关工作使用同 Goal、标题词项/中文 bigram、共享声明路径、错误指纹的确定性分数。同 Goal 提供 `same_goal` 证据，即使文件与标题不同也能发现相关活跃工作。最多返回 10 项活跃候选，附来源与证据；标题相似不会自动变成 `same_work`。`possible_duplicate` 需要共同路径与错误指纹，但仍是提示，不创建锁或合并身份。
 
 反馈可取 `same_work | related_but_distinct | not_related | intentional_parallel`。`not_related` 在该 Change 后续上下文中隐藏对应候选；其他反馈附带展示，不自动重写 Change 归属或身份。
 
@@ -185,9 +185,13 @@ Context 在 repeatable-read 只读事务中读取：当前 Goal/Change、相关�
 | `POST /auth/login` | `{ token }`，仅接受 human 凭据 |
 | `POST /auth/logout` | 删除浏览器会话 |
 | `GET /api/v1/atlas` | 项目快照 |
+| `GET /api/v1/findings?scope=repo` | 当前仓库最近 Findings |
+| `GET /api/v1/findings?scope=change&change_id=...` | 当前仓库指定 Change 的 Findings |
 | `GET /api/v1/context?change_id=...&session_id=...` | 工作上下文 |
 | `POST /api/v1/tools/:action` | 与七个 MCP 工具共享输入/规则 |
 | `POST /api/v1/decisions/:id/resolve` | 仅 human 可调用的裁决接口 |
+
+Findings 查询必须显式选择 `scope=repo` 或 `scope=change`，后者要求 UUID `change_id`；拒绝未知/重复参数，不接受客户端自选仓库。返回 Findings 含 Change 标题、Session、成员、Agent 类型和置信度，按时间及 UUID 从新到旧，最多 100 条；`truncated` 标记是否有更多。已完成/放弃工作仍可读取 Findings，当前没有分页。工作台使用该独立接口切换范围，未选择时不加载。
 
 裁决输入：`request_id`、`expected_version`、`option_id`、`resolution`。Option UUID 来自读取到的决策，不能传 label 或其他决策的选项。裁决结果、影响范围和审计一起持久化。
 
