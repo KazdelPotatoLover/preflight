@@ -16,7 +16,7 @@ const labels = {
   coordinating: "协商中",
   negotiating: "协商中",
   agent_resolved: "已达成一致",
-  deferred: "已隔离推进",
+  deferred: "待隔离处理",
   needs_input: "目标信息缺口",
   human_resolved: "历史人工结果",
   reported_completed: "已报告完成",
@@ -93,7 +93,7 @@ function findingCard(finding) {
 }
 let project,
   filter = "all",
-  findingChange = "",
+  findingChange = "all",
   findingData,
   findingError = "",
   findingsLoading = false,
@@ -183,7 +183,7 @@ async function api(path, body) {
   const payload = await response.json();
   if (response.status === 401) {
     project = undefined;
-    findingChange = "";
+    findingChange = "all";
     findingData = undefined;
     findingRequest++;
     $("board").hidden = true;
@@ -199,7 +199,7 @@ function badge(state) {
 }
 function workCard(c) {
   const v = c.verification;
-  return `<article class="work"><div class="work-title"><span>${escape(c.title)}</span>${badge((c.waiting_for_coordination ?? (c.waiting_for_coordination ?? c.waiting_for_decision)) ? "waiting" : c.status)}</div><div class="work-meta"><span>${escape(c.created_by)}</span><span>${escape(c.branch ?? "尚未关联分支")}</span><span>${escape(c.id.slice(0, 8))}</span><span>v${c.version}</span></div>${c.likely_scope.length ? `<div class="scope">${c.likely_scope.map(escape).join(" · ")}</div>` : ""}<details><summary>查看进展与验收</summary><p>${escape(c.summary)}</p>${v ? `<div class="verification"><strong>${v.result === "passed" ? "✓ 已报告验证通过" : "验证失败"}</strong><div class="scope">${escape(v.command)} · ${escape(v.head_sha.slice(0, 10))}</div><ul>${v.criteria.map((r) => `<li>${r.passed ? "✓" : "×"} 条件 ${r.index + 1}：${escape(r.evidence)}</li>`).join("")}</ul></div>` : '<p class="muted">尚未报告验证结果。</p>'}${c.pr_url ? `<a href="${escape(c.pr_url)}" target="_blank" rel="noopener noreferrer">查看 Pull Request ↗</a>` : ""}</details></article>`;
+  return `<article class="work"><div class="work-title"><span>${escape(c.title)}</span>${badge((c.waiting_for_coordination ?? (c.waiting_for_coordination ?? c.waiting_for_decision)) ? "waiting" : c.status)}</div><div class="work-meta"><span>${escape(c.created_by)}</span><span>${escape(c.branch ?? "尚未关联分支")}</span><span>${escape(c.id.slice(0, 8))}</span><span>v${c.version}</span></div>${c.likely_scope.length ? `<div class="scope">${c.likely_scope.map(escape).join(" · ")}</div>` : ""}<details><summary>查看进展与验收</summary><p>${escape(c.summary)}</p>${v ? `<div class="verification"><strong>${v.result === "passed" ? "✓ 已报告验证通过" : "验证失败"}</strong><div class="scope">${escape(v.command)} · ${escape(v.head_sha.slice(0, 10))}</div><ul>${v.criteria.map((r) => `<li>${r.passed ? "✓" : "×"} 条件 ${r.index + 1}：${escape(r.evidence)}</li>`).join("")}</ul>${v.isolated_decisions?.length ? `<details><summary>已报告的隔离证据 · ${v.isolated_decisions.length} 项</summary>${v.isolated_decisions.map((record) => `<div class="scope">${escape(record.decision_id)}</div><p>措施：${escape(record.mitigation)}</p><p>证据：${escape(record.evidence)}</p>`).join("")}</details>` : ""}</div>` : '<p class="muted">尚未报告验证结果。</p>'}${c.pr_url ? `<a href="${escape(c.pr_url)}" target="_blank" rel="noopener noreferrer">查看 Pull Request ↗</a>` : ""}</details></article>`;
 }
 function renderGoals() {
   $("goals").innerHTML =
@@ -296,7 +296,7 @@ function renderCoordination() {
   const gaps = project.decisions.filter((d) => d.status === "needs_input");
   const items = project.decisions.filter((d) => d.status !== "needs_input");
   $("decision-count").textContent = items.filter((d) => d.status === "negotiating").length;
-  $("coordination-summary").textContent = `已达成 ${project.summary.resolved_decisions ?? items.filter((d) => d.status === "agent_resolved").length} · 隔离推进 ${project.summary.deferred_decisions ?? items.filter((d) => d.status === "deferred").length}`;
+  $("coordination-summary").textContent = `已达成 ${project.summary.resolved_decisions ?? items.filter((d) => d.status === "agent_resolved").length} · 隔离建议 ${project.summary.deferred_decisions ?? items.filter((d) => d.status === "deferred").length}`;
   $("decisions").replaceChildren(...items.map(coordinationCard));
   if (!items.length) textNode($("decisions"), "div", "当前没有待协商事项。Agent 可继续开展工作。", "empty");
   $("input-gaps-panel").hidden = gaps.length === 0;
@@ -371,7 +371,7 @@ $("logout").addEventListener("click", async () => {
   try {
     await api("/auth/logout", {});
     project = undefined;
-    findingChange = "";
+    findingChange = "all";
     findingRequest++;
     findingData = undefined;
     findingError = "";

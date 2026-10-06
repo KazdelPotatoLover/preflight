@@ -44,6 +44,9 @@ try {
   await page.locator('#token').fill(token);
   await page.getByRole('button', { name: '连接团队' }).click();
   await page.locator('#board').waitFor({ state: 'visible' });
+  await page.locator('#findings[data-state=ready]').waitFor();
+  assert.equal(await page.locator('#findings-change').inputValue(), 'all', 'Agent consensus defaults to the repository timeline');
+  assert.equal(await page.locator('.finding').count(), 1);
   assert.deepEqual(await page.locator('.work .badge').allTextContents(), ['协商中', '协商中']);
   assert.equal(await page.locator('#decisions form, #decisions input, #decisions button').count(), 0);
   await page.locator('#findings-change').selectOption(work.change.id);
@@ -80,7 +83,7 @@ try {
   assert.match(await coordination.innerText(), /Agent 已达成一致：B/);
   assert((await service.context(actor, work.change.id, work.session_id)).blocking === false);
   const { decision: disagreement } = await service.execute(actor, 'preflight_propose_decision', { request_id: randomUUID(), change_id: work.change.id, session_id: work.session_id,
-    question: '普通实现分歧', context: '三轮后隔离推进，不回到人工待办', category: 'architecture_boundary', urgency: 'normal',
+    question: '普通实现分歧', context: '三轮后隔离推进，不回到人工待办', category: 'architecture_boundary', urgency: 'blocking',
     options: [{ label: 'A', description: '实现 A' }, { label: 'B', description: '实现 B' }], affected_change_ids: [peer.change.id] }) as { decision: ReviewDecision };
   for (let round = 1; round <= 3; round++) {
     await review(actor, work, disagreement.id, 'object');
@@ -89,12 +92,26 @@ try {
   const { decision: gap } = await service.execute(actor, 'preflight_propose_decision', { request_id: randomUUID(), change_id: work.change.id, session_id: work.session_id,
     question: '缺少目标边界', context: '需要补充允许变更的目标范围', category: 'product_behavior', urgency: 'normal', authority: 'missing_information',
     options: [{ label: 'A', description: '补充范围 A' }, { label: 'B', description: '补充范围 B' }] }) as { decision: ReviewDecision };
+  for (const status of ['implementing', 'verifying', 'completed']) {
+    const current = (await service.project(peerActor)).changes.find(c => c.id === peer.change.id);
+    assert(current);
+    await service.execute(peerActor, 'preflight_report_progress', { request_id: randomUUID(), change_id: peer.change.id, session_id: peer.session_id,
+      expected_version: current.version, status, summary: '浏览器测试隔离证据记录', ...(status === 'completed' ? { verification: {
+        head_sha: 'a'.repeat(40), command: 'browser isolation fixture', result: 'passed', criteria: [{ index: 0, passed: true, evidence: '测试隔离记录已验证' }],
+        isolated_decisions: [{ decision_id: disagreement.id, mitigation: '保持独立边界', evidence: unsafeEvidence }],
+      } } : {}) });
+  }
   await page.getByRole('button', { name: '刷新', exact: true }).click();
   await page.locator(`[data-decision="${disagreement.id}"][data-status=deferred]`).waitFor();
   assert.match(await page.locator(`[data-decision="${disagreement.id}"]`).innerText(), /建议隔离受影响工作/);
+  assert.match(await page.locator(`[data-decision="${disagreement.id}"]`).innerText(), /待隔离处理/);
   await page.locator(`#input-gaps [data-decision="${gap.id}"][data-status=needs_input]`).waitFor();
   assert.equal(await page.locator('#decisions [data-status=needs_input]').count(), 0);
   assert.equal(await page.locator('#decisions form, #input-gaps form').count(), 0);
+  const isolatedWork = page.locator('.work').filter({ hasText: '验证兼容边界' });
+  assert((await isolatedWork.locator('.verification').textContent())?.includes(unsafeEvidence));
+  assert.match(await isolatedWork.locator('.verification').textContent() ?? '', /已报告的隔离证据/);
+  assert.equal(await isolatedWork.locator('img, svg, script').count(), 0);
   const second = await service.execute(actor, 'preflight_start_work', { request_id: randomUUID(), goal_id: goal.id, title: '另一项工作', agent_type: 'browser-test' }) as { change: t.Change; session_id: string };
   await service.execute(actor, 'preflight_publish_findings', { request_id: randomUUID(), change_id: second.change.id, session_id: second.session_id,
     findings: [{ kind: 'observation', content: '另一项工作的独立发现', confidence: 1 }] });
@@ -125,6 +142,12 @@ try {
   await page.getByText('<img src=x onerror=alert(1)> 新的计划目标', { exact: true }).waitFor();
   assert.equal(await page.locator('#goals img').count(), 0);
   assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
+  await page.locator('#findings-change').selectOption(work.change.id);
+  await page.locator('#findings[data-state=ready]').waitFor();
+  await page.reload();
+  await page.locator('#findings[data-state=ready]').waitFor();
+  assert.equal(await page.locator('#findings-change').inputValue(), 'all', 'A fresh page consistently starts at the repository timeline');
+  assert.equal(await page.locator('.finding').count(), 2);
   await mkdir('.preflight/screenshots', { recursive: true });
   await page.screenshot({ path: '.preflight/screenshots/board-desktop.png', fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
