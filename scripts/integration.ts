@@ -282,6 +282,15 @@ try {
   await errorCode(alice, 'preflight_report_progress', { request_id: randomUUID(), ...completeArgs, verification: { ...verification, criteria: [verification.criteria[0]], isolated_decisions: [isolation] } }, 'VERIFICATION_REQUIRED');
   await mutate(a, 'completed', 3, { verification: { ...verification, isolated_decisions: [isolation] } });
   await mutate(b, 'completed', 3, { verification: { ...verification, isolated_decisions: [isolation] } });
+  const completedContext = await call<typeof context & { recommended_action: string }>(alice, 'preflight_get_context', { change_id: a.change.id, session_id: a.session_id });
+  assert.equal(completedContext.blocking, false);
+  assert.equal(completedContext.recommended_action, 'continue');
+  assert(completedContext.pending_decisions.some(d => d.id === dispute.id && d.status === 'deferred'), 'Retain deferred history without waiting after isolated completion');
+  await call(alice, 'preflight_propose_decision', { ...proposal, question: 'Advice on abandoned work', request_id: randomUUID(), change_id: source.change.id, session_id: source.session_id });
+  const abandonedContext = await call<typeof context & { recommended_action: string }>(alice, 'preflight_get_context', { change_id: source.change.id, session_id: source.session_id });
+  assert.equal(abandonedContext.blocking, false);
+  assert.equal(abandonedContext.recommended_action, 'continue');
+  assert(abandonedContext.pending_decisions.some(d => d.status === 'negotiating'));
   const board = await call<{ summary: { completed_changes: number }; goals: { id: string; progress: string }[]; events: { action: string }[] }>(bob, 'preflight_get_project');
   assert.equal(board.summary.completed_changes, 2);
   assert.equal(board.goals.find(g => g.id === goal.id)?.progress, 'reported_completed');
@@ -289,6 +298,7 @@ try {
   const coordinationBoard = await call<{ changes: { id: string; waiting_for_coordination: boolean }[]; decisions: Decision[]; summary: { deferred_decisions: number; needs_input_decisions: number; resolved_decisions: number } }>(bob, 'preflight_get_project');
   assert.equal(coordinationBoard.changes.find(c => c.id === a.change.id)?.waiting_for_coordination, false);
   assert.equal(coordinationBoard.changes.find(c => c.id === b.change.id)?.waiting_for_coordination, false);
+  assert.equal(coordinationBoard.changes.find(c => c.id === source.change.id)?.waiting_for_coordination, false);
   assert.equal(coordinationBoard.decisions.find(d => d.id === dispute.id)?.status, 'deferred');
   assert.equal(coordinationBoard.summary.deferred_decisions, 1);
   assert.equal(coordinationBoard.summary.needs_input_decisions, 0);

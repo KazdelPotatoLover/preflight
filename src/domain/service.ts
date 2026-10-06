@@ -265,11 +265,12 @@ export class CollaborationService {
       const views = await this.decisionViews(db, actor, impacted.map(r => r.decision));
       const pending = views.filter(d => openDecisionStatuses.includes(d.status));
       const blocking = pending.filter(d => d.urgency === 'blocking');
+      const terminal = ['completed', 'abandoned'].includes(change.status);
       const [goal] = await db.select().from(t.goals).where(eq(t.goals.id, change.goal_id));
       return { version: '1', generated_at: now(), repo: actor.repo, goal, current_change: change,
         related_work: related, findings, pending_decisions: pending,
         resolved_decisions: views.filter(d => ['agent_resolved', 'human_resolved'].includes(d.status)).slice(0, 20),
-        blocking: blocking.length > 0, recommended_action: pending.some(d => d.status === 'needs_input') ? 'clarify_goal'
+        blocking: !terminal && blocking.length > 0, recommended_action: terminal ? 'continue' : pending.some(d => d.status === 'needs_input') ? 'clarify_goal'
           : pending.some(d => d.status === 'deferred') ? 'isolate_disputed_scope' : pending.some(d => d.status === 'negotiating') ? 'coordinate' : 'continue',
         policies: [], capabilities: { git_observer: false, semantic_matching: false, policy_reuse: false },
         warnings: ['Scope, progress and verification are agent reports; no Git facts have been verified.'],
