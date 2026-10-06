@@ -26,9 +26,133 @@ const eventLabels = {
   "decision.attached": "关联了共同决策",
   "decision.resolved": "作出了裁决",
 };
+const findingLabels = {
+  observation: "观察",
+  hypothesis: "假设",
+  root_cause: "根因",
+  constraint: "约束",
+  test_result: "验证结果",
+};
+function findingCard(finding) {
+  const card = document.createElement("article");
+  card.className = "finding";
+  const head = document.createElement("div");
+  head.className = "finding-head";
+  const kind = document.createElement("span");
+  kind.className = "badge";
+  kind.textContent = findingLabels[finding.kind] ?? finding.kind;
+  const confidence = document.createElement("span");
+  confidence.textContent = `置信度 ${Math.round(finding.confidence * 100)}% · Agent 上报`;
+  const time = document.createElement("time");
+  time.dateTime = new Date(finding.created_at).toISOString();
+  time.textContent = new Date(finding.created_at).toLocaleString("zh-CN");
+  head.append(kind, confidence, time);
+  const content = document.createElement("p");
+  content.className = "finding-content";
+  content.textContent = finding.content;
+  const source = document.createElement("div");
+  source.className = "finding-source";
+  const title = document.createElement("strong");
+  title.textContent = finding.change_title;
+  const member = document.createElement("span");
+  member.textContent = `${finding.member} · ${finding.agent_type}`;
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  summary.textContent = "来源标识";
+  const ids = document.createElement("dl");
+  for (const [label, value] of [
+    ["Finding", finding.id],
+    ["Change", finding.change_id],
+    ["Session", finding.session_id],
+  ]) {
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const definition = document.createElement("dd");
+    definition.textContent = value;
+    ids.append(term, definition);
+  }
+  details.append(summary, ids);
+  source.append(title, member, details);
+  card.append(head, content, source);
+  return card;
+}
 let project,
   filter = "all",
+  findingChange = "",
+  findingData,
+  findingError = "",
+  findingsLoading = false,
+  findingRequest = 0,
   loading = false;
+function renderFindings() {
+  const findings = findingData?.findings;
+  const previousTitle = $("findings-change").selectedOptions[0]?.textContent;
+  const select = $("findings-change");
+  const choices = new Map(project.changes.map((c) => [c.id, c.title]));
+  for (const finding of findings ?? [])
+    choices.set(finding.change_id, finding.change_title);
+  if (findingChange && findingChange !== "all" && !choices.has(findingChange))
+    choices.set(findingChange, previousTitle ?? findingChange);
+  select.replaceChildren();
+  for (const [value, label] of [
+    ["", "请选择查看范围"],
+    ["all", "全仓库 · 最近发现"],
+    ...[...choices].map(([id, title]) => [id, `${title} · ${id.slice(0, 8)}`]),
+  ]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    select.append(option);
+  }
+  select.value = findingChange;
+  const visible = findings ?? [];
+  $("finding-count").textContent = visible.length;
+  $("findings-note").textContent = findingData
+    ? `按时间从新到旧显示${findingData.truncated ? `最近 ${findingData.limit} 条，更多历史发现未显示` : "当前范围的发现"}。置信度来自 Agent 上报。`
+    : "发现内容与置信度由 Agent 上报，请结合来源核实。";
+  $("findings").dataset.state = findingsLoading ? "loading" : findingError ? "error" : findingData ? "ready" : "idle";
+  $("findings").replaceChildren(...visible.map(findingCard));
+  if (!visible.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = findingsLoading
+      ? "正在读取发现…"
+      : findingError
+        ? `发现读取失败：${findingError}。可点击刷新重试。`
+        : !findingChange
+          ? "选择一项工作或全仓库，查看团队共享的发现。"
+          : findingChange === "all"
+            ? "本仓库暂时没有共享发现。"
+            : "这项工作尚未共享发现。";
+    $("findings").append(empty);
+  }
+}
+async function refreshFindings() {
+  const request = ++findingRequest;
+  findingData = undefined;
+  findingError = "";
+  findingsLoading = Boolean(findingChange);
+  renderFindings();
+  if (!findingChange) return;
+  const query = new URLSearchParams(findingChange === "all"
+    ? { scope: "repo" }
+    : { scope: "change", change_id: findingChange });
+  try {
+    const data = await api(`/api/v1/findings?${query}`);
+    if (request !== findingRequest) return;
+    if (!Array.isArray(data?.findings)) throw new Error("服务返回的发现数据无效");
+    findingData = data;
+  } catch (error) {
+    if (request !== findingRequest) return;
+    findingError = error.message;
+  } finally {
+    if (request === findingRequest && project) {
+      findingsLoading = false;
+      renderFindings();
+    }
+  }
+}
+
 function message(text, error = false) {
   $("message").textContent = text;
   $("message").className = error ? "error" : "";
@@ -43,6 +167,10 @@ async function api(path, body) {
   });
   const payload = await response.json();
   if (response.status === 401) {
+    project = undefined;
+    findingChange = "";
+    findingData = undefined;
+    findingRequest++;
     $("board").hidden = true;
     $("login-panel").hidden = false;
     $("logout").hidden = true;
@@ -93,6 +221,7 @@ function render() {
     )
     .join("");
   renderGoals();
+  renderFindings();
   const pending = project.decisions.filter((d) => d.status === "pending");
   $("decision-count").textContent = pending.length;
   $("decisions").innerHTML =
@@ -137,6 +266,7 @@ async function refresh(silent = false) {
     $("connection").textContent = "团队已连接";
     $("connection-dot").className = "dot online";
     render();
+    await refreshFindings();
   } catch (error) {
     $("connection").textContent = "未连接或数据已过期";
     $("connection-dot").className = "dot offline";
@@ -164,6 +294,10 @@ $("logout").addEventListener("click", async () => {
   try {
     await api("/auth/logout", {});
     project = undefined;
+    findingChange = "";
+    findingRequest++;
+    findingData = undefined;
+    findingError = "";
     $("board").hidden = true;
     $("login-panel").hidden = false;
     $("logout").hidden = true;
@@ -174,6 +308,10 @@ $("logout").addEventListener("click", async () => {
   }
 });
 $("refresh").addEventListener("click", () => refresh());
+$("findings-change").addEventListener("change", (event) => {
+  findingChange = event.target.value;
+  void refreshFindings();
+});
 $("new-goal").addEventListener("click", () => $("goal-dialog").showModal());
 $("close-goal").addEventListener("click", () => $("goal-dialog").close());
 $("goal-form").addEventListener("submit", async (event) => {

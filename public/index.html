@@ -67,6 +67,20 @@
                 ><button data-filter="completed">已完成</button>
               </div>
               <div id="goals"></div>
+              <section class="findings-section" aria-labelledby="findings-heading">
+                <div class="section-heading">
+                  <h2 id="findings-heading">团队发现</h2>
+                  <span id="finding-count" class="count">0</span>
+                </div>
+                <div class="findings-controls">
+                  <label for="findings-change">查看范围</label>
+                  <select id="findings-change">
+                    <option value="">请选择查看范围</option>
+                  </select>
+                </div>
+                <p id="findings-note" class="findings-note"></p>
+                <div id="findings" aria-live="polite"></div>
+              </section>
             </section>
             <aside>
               <div class="section-heading">

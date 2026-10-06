@@ -26,7 +26,11 @@ let browser: Browser | undefined;
 try {
   browser = await chromium.launch({ headless: true, executablePath: process.env.PREFLIGHT_CHROMIUM_PATH });
   const { goal } = await service.execute(actor, 'preflight_register_goal', { request_id: randomUUID(), title: '修复登录超时', objective: '保持公共接口兼容', acceptance: ['相关测试通过'] }) as { goal: typeof t.goals.$inferSelect };
-  const work = await service.execute(actor, 'preflight_start_work', { request_id: randomUUID(), goal_id: goal.id, title: '调查登录异常', agent_type: 'browser-test', likely_scope: ['src/auth.ts'] }) as { change: t.Change; session_id: string };
+  const unsafeAgentType = '<svg onload=alert(1)> browser-test';
+  const work = await service.execute(actor, 'preflight_start_work', { request_id: randomUUID(), goal_id: goal.id, title: '调查登录异常', agent_type: unsafeAgentType, likely_scope: ['src/auth.ts'] }) as { change: t.Change; session_id: string };
+  const unsafeFinding = '<img src=x onerror=alert(1)>\n保留换行与发现内容';
+  await service.execute(actor, 'preflight_publish_findings', { request_id: randomUUID(), change_id: work.change.id, session_id: work.session_id,
+    findings: [{ kind: 'hypothesis', content: unsafeFinding, confidence: 0.42 }] });
   await service.execute(actor, 'preflight_propose_decision', { request_id: randomUUID(), change_id: work.change.id, session_id: work.session_id, question: '是否调整公共错误格式？', context: '需要团队共同确认兼容边界', category: 'public_api_behavior', urgency: 'blocking', options: [{ label: 'A', description: '修改错误格式' }, { label: 'B', description: '保持兼容' }], recommendation: 'B' });
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   const errors: string[] = [];
@@ -37,11 +41,41 @@ try {
   await page.getByRole('button', { name: '连接团队' }).click();
   await page.locator('#board').waitFor({ state: 'visible' });
   assert.equal(await page.locator('.work .badge').innerText(), '等待决策');
+  await page.locator('#findings-change').selectOption(work.change.id);
+  await page.locator('#findings[data-state=ready]').waitFor();
+  assert.equal(await page.locator('.finding-content').textContent(), unsafeFinding);
+  assert.match(await page.locator('.finding-head').innerText(), /置信度 42%/);
+  assert.match(await page.locator('.finding-source').innerText(), /调查登录异常/);
+  assert((await page.locator('.finding-source').innerText()).includes(`browser-agent · ${unsafeAgentType}`));
+  assert((await page.locator('.finding-source dd').allTextContents()).includes(work.change.id));
+  assert((await page.locator('.finding-source dd').allTextContents()).includes(work.session_id));
+  assert.equal(await page.locator('.finding img, .finding script, .finding svg').count(), 0);
   await page.locator('input[type=radio]').nth(1).check();
   await page.locator('textarea[name=resolution]').fill('维持对外接口兼容，仅调整内部实现');
   await page.getByRole('button', { name: '确认裁决' }).click();
   await page.locator('.resolved-note').waitFor({ state: 'visible' });
   assert((await service.context(actor, work.change.id, work.session_id)).blocking === false);
+  const second = await service.execute(actor, 'preflight_start_work', { request_id: randomUUID(), goal_id: goal.id, title: '另一项工作', agent_type: 'browser-test' }) as { change: t.Change; session_id: string };
+  await service.execute(actor, 'preflight_publish_findings', { request_id: randomUUID(), change_id: second.change.id, session_id: second.session_id,
+    findings: [{ kind: 'observation', content: '另一项工作的独立发现', confidence: 1 }] });
+  const emptyWork = await service.execute(actor, 'preflight_start_work', { request_id: randomUUID(), goal_id: goal.id, title: '尚无发现的工作', agent_type: 'browser-test' }) as { change: t.Change; session_id: string };
+  await page.getByRole('button', { name: '刷新', exact: true }).click();
+  await page.locator(`#findings-change option[value="${emptyWork.change.id}"]`).waitFor({ state: 'attached' });
+  assert.equal(await page.locator('#findings-change').inputValue(), work.change.id, 'Refresh must preserve the selected Change');
+  await page.locator('#findings[data-state=ready]').waitFor();
+  assert.equal(await page.locator('.finding').count(), 1);
+  await page.locator('#findings-change').selectOption('all');
+  await page.locator('#findings[data-state=ready]').waitFor();
+  assert.equal(await page.locator('.finding').count(), 2);
+  await page.locator('#findings-change').selectOption(second.change.id);
+  await page.locator('#findings[data-state=ready]').waitFor();
+  assert.equal(await page.locator('.finding-content').textContent(), '另一项工作的独立发现');
+  await page.locator('#findings-change').selectOption(emptyWork.change.id);
+  await page.locator('#findings[data-state=ready]').waitFor();
+  assert.equal(await page.locator('.finding').count(), 0);
+  assert.match(await page.locator('#findings').innerText(), /这项工作尚未共享发现/);
+  await page.locator('#findings-change').selectOption('all');
+  await page.locator('#findings[data-state=ready]').waitFor();
   await page.getByRole('button', { name: '＋ 登记目标' }).click();
   await page.locator('#goal-title').fill('<img src=x onerror=alert(1)> 新的计划目标');
   await page.locator('#goal-objective').fill('可以在没有 Agent 工作时保留计划');
@@ -59,7 +93,7 @@ try {
   await page.getByRole('button', { name: '退出', exact: true }).click();
   await page.locator('#login-panel').waitFor({ state: 'visible' });
   assert.deepEqual(errors, []);
-  console.log('✓ Real Chromium: human login, blocking work, decision resolution, planned goal, XSS escaping, private session, mobile layout and logout');
+  console.log('✓ Real Chromium: human login, decision resolution, Findings scopes/source/confidence/empty state/refresh, XSS escaping, private session, mobile layout and logout');
 } finally {
   await browser?.close();
   await new Promise<void>(resolve => server.close(() => resolve()));
