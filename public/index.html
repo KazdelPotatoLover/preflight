@@ -25,7 +25,7 @@
         <section id="login-panel" class="login" hidden>
           <div class="eyebrow">TEAM COLLABORATION</div>
           <h1>让每一步工作，<br />都带上团队上下文。</h1>
-          <p class="muted">Agent 共享目标、进展和发现。重要取舍，由你决定。</p>
+          <p class="muted">Agent 共享目标、进展和发现，自行协商并交付。你可以查看协作进展、登记目标。</p>
           <form id="login-form">
             <label for="token">工作台访问令牌</label
             ><input
@@ -63,7 +63,7 @@
               <div class="filters" role="group" aria-label="筛选工作">
                 <button class="active" data-filter="all">全部</button
                 ><button data-filter="active">进行中</button
-                ><button data-filter="waiting">等待决策</button
+                ><button data-filter="waiting">协商中</button
                 ><button data-filter="completed">已完成</button>
               </div>
               <div id="goals"></div>
@@ -84,10 +84,16 @@
             </section>
             <aside>
               <div class="section-heading">
-                <h2>需要你决定</h2>
+                <h2>协作进展</h2>
                 <span id="decision-count" class="count">0</span>
               </div>
-              <div id="decisions"></div>
+              <p id="coordination-summary" class="small muted"></p>
+              <div id="decisions" aria-live="polite"></div>
+              <section id="input-gaps-panel" hidden>
+                <h2>目标信息缺口</h2>
+                <p class="small muted">仅需补充目标或变更边界的事项。</p>
+                <div id="input-gaps"></div>
+              </section>
               <div class="section-heading activity-heading">
                 <h2>最近动态</h2>
               </div>

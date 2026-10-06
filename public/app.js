@@ -12,9 +12,15 @@ const labels = {
   abandoned: "已放弃",
   planned: "待开始",
   active: "进行中",
-  waiting_for_decision: "等待决策",
+  waiting_for_decision: "协商中",
+  coordinating: "协商中",
+  negotiating: "协商中",
+  agent_resolved: "已达成一致",
+  deferred: "已隔离推进",
+  needs_input: "目标信息缺口",
+  human_resolved: "历史人工结果",
   reported_completed: "已报告完成",
-  waiting: "等待决策",
+  waiting: "协商中",
 };
 const eventLabels = {
   "goal.created": "登记了目标",
@@ -24,7 +30,9 @@ const eventLabels = {
   "findings.published": "分享了发现",
   "decision.created": "提出了决策",
   "decision.attached": "关联了共同决策",
-  "decision.resolved": "作出了裁决",
+  "decision.resolved": "达成了协作结果",
+  "decision.reviewed": "提交了协商答复",
+  "decision.deferred": "记录了隔离建议",
 };
 const findingLabels = {
   observation: "观察",
@@ -73,7 +81,14 @@ function findingCard(finding) {
   }
   details.append(summary, ids);
   source.append(title, member, details);
-  card.append(head, content, source);
+  if (finding.content.length > 320) {
+    const expanded = document.createElement("details");
+    expanded.className = "finding-long";
+    const preview = document.createElement("summary");
+    preview.textContent = `${finding.content.slice(0, 160)}… 展开发现`;
+    expanded.append(preview, content);
+    card.append(head, expanded, source);
+  } else card.append(head, content, source);
   return card;
 }
 let project,
@@ -184,7 +199,7 @@ function badge(state) {
 }
 function workCard(c) {
   const v = c.verification;
-  return `<article class="work"><div class="work-title"><span>${escape(c.title)}</span>${badge(c.waiting_for_decision ? "waiting" : c.status)}</div><div class="work-meta"><span>${escape(c.created_by)}</span><span>${escape(c.branch ?? "尚未关联分支")}</span><span>${escape(c.id.slice(0, 8))}</span><span>v${c.version}</span></div>${c.likely_scope.length ? `<div class="scope">${c.likely_scope.map(escape).join(" · ")}</div>` : ""}<details><summary>查看进展与验收</summary><p>${escape(c.summary)}</p>${v ? `<div class="verification"><strong>${v.result === "passed" ? "✓ 已报告验证通过" : "验证失败"}</strong><div class="scope">${escape(v.command)} · ${escape(v.head_sha.slice(0, 10))}</div><ul>${v.criteria.map((r) => `<li>${r.passed ? "✓" : "×"} 条件 ${r.index + 1}：${escape(r.evidence)}</li>`).join("")}</ul></div>` : '<p class="muted">尚未报告验证结果。</p>'}${c.pr_url ? `<a href="${escape(c.pr_url)}" target="_blank" rel="noopener noreferrer">查看 Pull Request ↗</a>` : ""}</details></article>`;
+  return `<article class="work"><div class="work-title"><span>${escape(c.title)}</span>${badge((c.waiting_for_coordination ?? (c.waiting_for_coordination ?? c.waiting_for_decision)) ? "waiting" : c.status)}</div><div class="work-meta"><span>${escape(c.created_by)}</span><span>${escape(c.branch ?? "尚未关联分支")}</span><span>${escape(c.id.slice(0, 8))}</span><span>v${c.version}</span></div>${c.likely_scope.length ? `<div class="scope">${c.likely_scope.map(escape).join(" · ")}</div>` : ""}<details><summary>查看进展与验收</summary><p>${escape(c.summary)}</p>${v ? `<div class="verification"><strong>${v.result === "passed" ? "✓ 已报告验证通过" : "验证失败"}</strong><div class="scope">${escape(v.command)} · ${escape(v.head_sha.slice(0, 10))}</div><ul>${v.criteria.map((r) => `<li>${r.passed ? "✓" : "×"} 条件 ${r.index + 1}：${escape(r.evidence)}</li>`).join("")}</ul></div>` : '<p class="muted">尚未报告验证结果。</p>'}${c.pr_url ? `<a href="${escape(c.pr_url)}" target="_blank" rel="noopener noreferrer">查看 Pull Request ↗</a>` : ""}</details></article>`;
 }
 function renderGoals() {
   $("goals").innerHTML =
@@ -195,11 +210,11 @@ function renderGoals() {
           (c) =>
             filter === "all" ||
             (filter === "waiting"
-              ? c.waiting_for_decision
+              ? (c.waiting_for_coordination ?? c.waiting_for_decision)
               : filter === "completed"
                 ? c.status === "completed"
                 : !["completed", "abandoned"].includes(c.status) &&
-                  !c.waiting_for_decision),
+                  !(c.waiting_for_coordination ?? c.waiting_for_decision)),
         );
         if (filter !== "all" && !work.length) return "";
         return `<article class="goal-card"><div class="goal-head"><div class="section-heading"><h3>${escape(goal.title)}</h3>${badge(goal.progress)}</div><p>${escape(goal.objective)}</p><ul class="criteria">${goal.acceptance.map((a) => `<li>${escape(a)}</li>`).join("")}</ul><span class="small muted">${escape(goal.id.slice(0, 8))} · ${all.length} 项工作</span></div>${work.length ? work.map(workCard).join("") : '<div class="work muted small">等待 Agent 开始工作。通过 MCP 查询项目可获取目标 ID。</div>'}</article>`;
@@ -207,12 +222,92 @@ function renderGoals() {
       .join("") ||
     '<div class="empty">这里还没有符合条件的工作。登记一个目标，或让 Agent 通过 MCP 开始协作。</div>';
 }
+function textNode(parent, tag, text, className = "") {
+  const node = document.createElement(tag);
+  node.className = className;
+  node.textContent = typeof text === "string" ? text : JSON.stringify(text ?? "", null, 2);
+  parent.append(node);
+  return node;
+}
+function workLabel(id) {
+  const change = project.changes.find((c) => c.id === id);
+  return change ? `${change.title} · ${id.slice(0, 8)}` : id;
+}
+function coordinationCard(decision) {
+  const card = document.createElement("article");
+  card.className = "decision coordination-card";
+  card.dataset.decision = decision.id;
+  card.dataset.status = decision.status;
+  const head = textNode(card, "div", "", "section-heading");
+  textNode(head, "h3", decision.question);
+  textNode(head, "span", labels[decision.status] ?? "历史待协商", "badge");
+  const reviews = decision.current_reviews ?? [];
+  const missing = decision.missing_change_ids ?? [];
+  const required = decision.required_change_ids ?? decision.affected_change_ids ?? [];
+  textNode(card, "p", `第 ${decision.review_round ?? 1}/${decision.round_limit ?? 3} 轮 · ${reviews.length}/${required.length} 项工作已答复`, "coordination-progress");
+  if (reviews.length) textNode(card, "p", `已答复：${reviews.map((r) => `${r.member}（${r.stance === "accept" ? "同意" : "异议"}）`).join("；")}`, "coordination-answered");
+  if (missing.length) textNode(card, "p", `待答复：${missing.map(workLabel).join("；")}`, "coordination-missing");
+  if (decision.status === "deferred")
+    textNode(card, "p", "已达到协商轮次上限。建议隔离受影响工作、保留分歧与证据，按各自边界继续推进。", "isolation-note");
+  if (decision.status === "needs_input")
+    textNode(card, "p", "目标或变更边界存在信息缺口，请补充目标信息；普通技术分歧由 Agent 自行协商。", "input-note");
+  if (["agent_resolved", "human_resolved"].includes(decision.status)) {
+    const chosen = decision.options.find((o) => o.id === decision.option_id);
+    textNode(card, "div", `${decision.status === "agent_resolved" ? "✓ Agent 已达成一致" : "历史人工结果"}${chosen ? `：${chosen.label}` : ""}`, "resolved-note");
+  }
+  if (decision.resolution) textNode(card, "p", decision.resolution, "coordination-resolution");
+  const details = document.createElement("details");
+  details.className = "coordination-evidence";
+  textNode(details, "summary", "查看选项与本轮报告证据");
+  textNode(details, "p", decision.context, "context");
+  for (const option of decision.options) {
+    const item = textNode(details, "div", "", "coordination-option");
+    textNode(item, "strong", `${option.label}${option.label === decision.recommendation ? " · 提案建议" : ""}`);
+    textNode(item, "p", option.description);
+    if (option.pros?.length) textNode(item, "p", `收益：${option.pros.join("；")}`);
+    if (option.cons?.length) textNode(item, "p", `取舍：${option.cons.join("；")}`);
+  }
+  function appendReview(parent, review) {
+    const report = textNode(parent, "section", "", "coordination-review");
+    const round = review.review_round ?? review.round;
+    if (round) textNode(report, "p", `第 ${round} 轮`, "small muted");
+    const option = decision.options.find((o) => o.id === review.option_id);
+    textNode(report, "h4", `${review.member} · ${review.stance === "accept" ? "同意" : "提出异议"}${option ? ` · ${option.label}` : ""}`);
+    textNode(report, "p", workLabel(review.change_id), "small muted");
+    textNode(report, "p", review.rationale);
+    for (const [key, label] of [["goal_alignment", "目标一致性"], ["constraints_check", "约束核查"], ["verification", "验证证据"]]) {
+      textNode(report, "strong", label);
+      textNode(report, "p", review.evidence?.[key], "review-evidence-text");
+    }
+  }
+  for (const review of reviews) appendReview(details, review);
+  if (!reviews.length) textNode(details, "p", "本轮尚无 Agent 答复。", "muted");
+  if (decision.review_history?.length) {
+    const history = document.createElement("details");
+    history.className = "coordination-history";
+    textNode(history, "summary", "查看历史轮次答复");
+    for (const review of decision.review_history) appendReview(history, review);
+    details.append(history);
+  }
+  card.append(details);
+  return card;
+}
+function renderCoordination() {
+  const gaps = project.decisions.filter((d) => d.status === "needs_input");
+  const items = project.decisions.filter((d) => d.status !== "needs_input");
+  $("decision-count").textContent = items.filter((d) => d.status === "negotiating").length;
+  $("coordination-summary").textContent = `已达成 ${project.summary.resolved_decisions ?? items.filter((d) => d.status === "agent_resolved").length} · 隔离推进 ${project.summary.deferred_decisions ?? items.filter((d) => d.status === "deferred").length}`;
+  $("decisions").replaceChildren(...items.map(coordinationCard));
+  if (!items.length) textNode($("decisions"), "div", "当前没有待协商事项。Agent 可继续开展工作。", "empty");
+  $("input-gaps-panel").hidden = gaps.length === 0;
+  $("input-gaps").replaceChildren(...gaps.map(coordinationCard));
+}
 function render() {
   $("repo").textContent = `${project.repo} / ${project.actor.member}`;
   $("metrics").innerHTML = [
     ["团队目标", project.summary.goals],
     ["正在开展", project.summary.active_changes],
-    ["等待裁决", project.summary.pending_decisions],
+    ["协商中", project.summary.negotiating_decisions ?? 0],
     ["已报告完成", project.summary.completed_changes],
   ]
     .map(
@@ -222,25 +317,7 @@ function render() {
     .join("");
   renderGoals();
   renderFindings();
-  const pending = project.decisions.filter((d) => d.status === "pending");
-  $("decision-count").textContent = pending.length;
-  $("decisions").innerHTML =
-    pending
-      .map(
-        (d) =>
-          `<article class="decision"><h3>${escape(d.question)}</h3><p class="context">${escape(d.context)}</p><div class="impact">${d.urgency === "blocking" ? "正在等待此决策" : "涉及"} · ${d.affected_change_ids.length} 项工作</div><form data-decision="${d.id}" data-version="${d.version}">${d.options.map((o) => `<label class="option"><input type="radio" name="option" value="${o.id}" required><strong>${escape(o.label)} ${o.label === d.recommendation ? "· Agent 建议" : ""}</strong><small>${escape(o.description)}</small>${o.pros.length ? `<small>收益：${o.pros.map(escape).join("；")}</small>` : ""}${o.cons.length ? `<small>取舍：${o.cons.map(escape).join("；")}</small>` : ""}</label>`).join("")}<label>裁决说明<textarea name="resolution" required maxlength="2000" placeholder="说明这次选择的依据"></textarea></label><button class="primary">确认裁决</button></form></article>`,
-      )
-      .join("") ||
-    '<div class="empty">暂时没有待处理的决策。<br>Agent 可以继续开展工作。</div>';
-  const resolved = project.decisions
-    .filter((d) => d.status === "human_resolved")
-    .slice(0, 3);
-  $("decisions").innerHTML += resolved
-    .map(
-      (d) =>
-        `<article class="decision"><h3>${escape(d.question)}</h3><div class="resolved-note">✓ ${escape(d.resolved_by)} 已裁决<p>${escape(d.resolution)}</p></div></article>`,
-    )
-    .join("");
+  renderCoordination();
   $("events").innerHTML =
     project.events
       .map(
@@ -344,35 +421,6 @@ $("goal-form").addEventListener("submit", async (event) => {
     $("goal-dialog").close();
     await refresh();
     message("目标已登记，团队 Agent 现在可以查询并开始工作。");
-  } catch (error) {
-    message(error.message, true);
-  } finally {
-    button.disabled = false;
-  }
-});
-$("decisions").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.target,
-    button = form.querySelector("button"),
-    fields = new FormData(form);
-  button.disabled = true;
-  const input = {
-    expected_version: Number(form.dataset.version),
-    option_id: fields.get("option"),
-    resolution: fields.get("resolution"),
-  };
-  const fingerprint = JSON.stringify(input);
-  if (form.dataset.fingerprint !== fingerprint) {
-    form.dataset.requestId = crypto.randomUUID();
-    form.dataset.fingerprint = fingerprint;
-  }
-  try {
-    await api(`/api/v1/decisions/${form.dataset.decision}/resolve`, {
-      ...input,
-      request_id: form.dataset.requestId,
-    });
-    await refresh();
-    message("裁决已保存。相关 Agent 下次读取上下文时将收到结果。");
   } catch (error) {
     message(error.message, true);
   } finally {

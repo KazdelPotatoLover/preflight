@@ -351,40 +351,6 @@ p {
   color: #a0782b;
   margin-bottom: 13px;
 }
-.option {
-  display: block;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  margin: 7px 0;
-  font-size: 12px;
-  cursor: pointer;
-}
-.option:has(input:checked) {
-  border-color: #5a9f84;
-  background: #f1f8f3;
-}
-.option input {
-  margin-right: 6px;
-  accent-color: var(--green);
-}
-.option strong {
-  font-weight: 550;
-}
-.option small {
-  display: block;
-  margin: 3px 0 0 23px;
-  color: var(--muted);
-}
-.decision textarea {
-  height: 60px;
-  min-height: 50px;
-  font-size: 12px;
-}
-.decision button {
-  width: 100%;
-  margin-top: 5px;
-}
 .count {
   border-radius: 100%;
   font-size: 11px;
@@ -462,7 +428,7 @@ label {
   color: #53665a;
   margin: 12px 0 6px;
 }
-input:not([type="radio"]),
+input,
 textarea {
   display: block;
   width: 100%;
@@ -519,6 +485,57 @@ dialog .primary {
 }
 .resolved-note p {
   white-space: pre-wrap;
+}
+#decisions {
+  max-height: 70vh;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.coordination-card .section-heading {
+  align-items: flex-start;
+}
+.coordination-card,
+.coordination-card p,
+.coordination-card summary {
+  overflow-wrap: anywhere;
+}
+.coordination-progress,
+.coordination-answered,
+.coordination-missing {
+  font-size: 11px;
+  color: var(--muted);
+}
+.coordination-resolution,
+.review-evidence-text {
+  white-space: pre-wrap;
+}
+.coordination-evidence {
+  font-size: 12px;
+}
+.coordination-evidence summary,
+.finding-long summary {
+  cursor: pointer;
+  color: var(--green);
+}
+.coordination-option,
+.coordination-review {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.coordination-review h4 {
+  margin: 0;
+}
+.isolation-note,
+.input-note {
+  font-size: 12px;
+  padding: 9px;
+  background: #fff6e6;
+  border-radius: 6px;
+}
+#input-gaps-panel {
+  margin-top: 20px;
 }
 .findings-section {
   margin-top: 28px;
@@ -580,6 +597,9 @@ dialog .primary {
   }
   .columns {
     grid-template-columns: 1fr;
+  }
+  .columns > aside {
+    order: -1;
   }
   .heading {
     align-items: flex-start;
