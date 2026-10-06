@@ -10,6 +10,16 @@ function change(id: string, title: string, scope: string[], fingerprints: string
     branch: null, verification: null, pr_url: null };
 }
 describe('collaboration boundaries', () => {
+  it('discovers distinct same-goal work without shared titles or paths and excludes other repositories', () => {
+    const current = change('a', 'backend database', ['src/domain/service.ts']);
+    const sibling = { ...change('b', '页面呈现', ['public/app.js']), goal_id: current.goal_id };
+    const results = relatedWork(current, [sibling, { ...sibling, id: 'foreign', repo: 'another/repo' }]);
+    expect(results).toHaveLength(1);
+    expect(results[0]?.change_id).toBe('b');
+    expect(results[0]?.relation).toBe('related_to');
+    expect(results[0]?.evidence).toContainEqual({ kind: 'same_goal', source: 'agent_explicit', value: current.goal_id });
+    expect(results[0]?.blocking).toBe(false);
+  });
   it('does not identify similar titles as the same work or lock an agent', () => {
     const result = relatedWork(change('a', 'improve login retry', []), [change('b', 'improve login logging', [])]);
     expect(result[0]?.relation).toBe('related_to');
