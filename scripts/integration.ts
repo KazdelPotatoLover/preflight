@@ -12,6 +12,7 @@ import { migrate } from '../src/db/migrate.js';
 import * as t from '../src/db/schema.js';
 import { CollaborationService } from '../src/domain/service.js';
 import type { Credential } from '../src/config.js';
+import { descriptions } from '../src/mcp/server.js';
 
 if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required for integration tests');
 const testSchema = `preflight_test_${randomUUID().replaceAll('-', '')}`;
@@ -36,7 +37,7 @@ try {
   assert.equal(upgraded[0]?.review_round, 1);
   assert.equal(upgraded[0]?.review_epoch, 1);
   assert.equal((await connection.client`SELECT status FROM decisions WHERE id = ${legacyResolved}`)[0]?.status, 'human_resolved');
-  assert.equal((await connection.client`SELECT * FROM schema_migrations`).length, 2);
+  assert.equal((await connection.client`SELECT * FROM schema_migrations`).length, 3);
   assert.equal((await connection.client`SELECT * FROM domain_events WHERE action = 'decision.coordination_migrated'`).length, 1);
   console.log('✓ Real legacy schema upgrades pending decisions once and preserves historical human resolutions');
 } catch (error) {
@@ -83,7 +84,7 @@ try {
   for (let i = 0; i < clients.length; i++) await clients[i]!.connect(new StreamableHTTPClientTransport(new URL(base + '/mcp'), { requestInit: { headers: { Authorization: `Bearer ${secrets[i]}` } } }));
   const alice = clients[0]!, bob = clients[1]!;
   const tools = await alice.listTools();
-  assert.equal(tools.tools.length, 8);
+  assert.equal(tools.tools.length, Object.keys(descriptions).length);
   assert(!tools.tools.some(tool => tool.name.includes('resolve')));
   assert.equal((await request('/api/v1/findings?scope=repo', undefined)).status, 401);
   const emptyFindings = await request('/api/v1/findings?scope=repo', secrets[0]);
@@ -92,7 +93,7 @@ try {
   for (const query of ['', '?scope=unknown', '?scope=change', '?scope=change&change_id=invalid', '?scope=repo&change_id=' + randomUUID(), '?scope=repo&repo=foreign', '?scope=repo&scope=change']) {
     assert.equal((await request('/api/v1/findings' + query, secrets[0])).status, 400, query);
   }
-  console.log('✓ Two independent authenticated clients initialize and discover eight real MCP tools');
+  console.log('✓ Two independent authenticated clients initialize and discover all real MCP tools');
   const goalInput = { request_id: randomUUID(), title: 'Fix login timeout', objective: 'Keep login backward compatible', acceptance: ['Tests pass', 'Public API is unchanged'] };
   const goals = await Promise.all([call<{ goal: typeof t.goals.$inferSelect }>(alice, 'preflight_register_goal', goalInput), call<{ goal: typeof t.goals.$inferSelect }>(alice, 'preflight_register_goal', goalInput)]);
   assert.equal(goals[0]!.goal.id, goals[1]!.goal.id);
@@ -364,6 +365,8 @@ try {
     await db.delete(t.changes).where(inArray(t.changes.repo, testRepos));
     await db.delete(t.sessions).where(inArray(t.sessions.repo, testRepos));
     await db.delete(t.goals).where(inArray(t.goals.repo, testRepos));
+    await db.delete(t.milestones).where(inArray(t.milestones.repo, testRepos));
+    await db.delete(t.projects).where(inArray(t.projects.repo, testRepos));
     await db.delete(t.events).where(inArray(t.events.repo, testRepos));
     await db.delete(t.mutations).where(inArray(t.mutations.repo, testRepos));
   });

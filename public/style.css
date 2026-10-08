@@ -669,3 +669,20 @@ dialog .primary {
     font-size: 20px;
   }
 }
+.planning-panel { border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin-bottom: 22px; }
+select { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; max-width: 100%; }
+dialog select { width: 100%; }
+.planning-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+.planning-actions select { width: auto; max-width: 100%; }
+.milestone { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.milestone span { font-size: 12px; color: var(--muted); }
+.work-management { margin: 10px 0; }
+.blocked, .dialog-error { color: #b74439; white-space: pre-wrap; }
+#task-board { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
+#task-board[hidden] { display: none; }
+.task-column { border: 1px solid var(--line); border-radius: 10px; padding: 10px; min-width: 0; overflow-wrap: anywhere; }
+.task-column .work { padding: 12px; }
+fieldset { margin: 12px 0; border: 1px solid var(--line); }
+.check { display: flex; align-items: flex-start; gap: 8px; }
+.check input { width: auto; margin-top: 4px; }
+@media (max-width: 560px) { #task-board { grid-template-columns: 1fr; } .planning-panel { padding: 14px; } }

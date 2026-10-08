@@ -17,6 +17,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:integration": "node --env-file=.env --import tsx scripts/integration.ts",
+    "test:management": "node --env-file=.env --import tsx scripts/management-integration.ts",
+    "test:management-ui": "node --env-file=.env --import tsx scripts/management-browser.ts",
     "test:ui": "node --env-file=.env --import tsx scripts/browser.ts"
   },
   "dependencies": {

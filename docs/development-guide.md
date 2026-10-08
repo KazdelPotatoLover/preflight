@@ -1,9 +1,9 @@
 # Preflight 开发说明
 
-> 当前实现：0.1.0 团队 MCP MVP。更新日期：2026-10-06。
+> 当前实现：0.1.0 团队 MCP MVP + v0.2 阶段 A 首版。更新日期：2026-10-08。
 > 产品范围见[产品说明](product-spec.md)，安装命令见[README](../README.md)。
 
-本文描述仓库当前实现。原始文档中的 pnpm workspace、Next.js、Redis、Observer、SSE、Embedding、Claim 和 Policy 是演进候选，尚未创建对应运行模块。MVP 优先完成共享目标、工作、发现、自主协商和验收记录。
+本文描述仓库当前实现。pnpm workspace、Next.js、Redis、Observer、SSE、Embedding 和 Policy 仍是演进候选。当前新增项目/里程碑、业务计划、独立子任务验收、依赖、主责任租约与历史检索，新增协议见第 13 节。
 
 ## 1. 架构与目录
 
@@ -14,21 +14,24 @@ src/
   index.ts                  # 启动、配置、关闭
   app.ts                    # Hono、认证、同源与输入大小限制、静态资源
   config.ts                 # 凭据格式、令牌哈希认证、过期检查
-  mcp/server.ts             # 八个工具、SDK transport、结果与错误映射
+  mcp/server.ts             # 十四个工具、SDK transport、结果与错误映射
   domain/
     contracts.ts            # Zod 契约、脱敏、稳定请求序列化
     service.ts              # 共享领域规则、事务、上下文与看板快照
+    management.ts           # 规划、依赖、主责任租约和历史检索
     related.ts              # 确定性相关工作提示
   db/
     client.ts               # PostgreSQL 连接与 Drizzle
     schema.ts               # 数据模型
     migrate.ts              # 初始迁移入口
-migrations/001_initial.sql
+migrations/                 # 001 初始、002 协商、003 项目管理
 public/                     # HTML、CSS、原生 JS 人类工作台
 scripts/
   setup.mjs                 # 私有初始化
   integration.ts            # 两个真实 MCP 客户端的数据库集成测试
   browser.ts                # Chromium 工作台与协商结果测试
+  management-integration.ts # MCP 管理/租约/依赖/升级测试
+  management-browser.ts     # Chromium 项目管理测试
 tests/                     # Vitest 契约、相关提示、脱敏和认证测试
 ```
 
@@ -52,28 +55,28 @@ REST 和 MCP 调用同一个 `CollaborationService`，不能在 transport 层重
 
 令牌明文只在本地私有 `client-tokens.json` 和分发给客户端的配置中，认证文件只存 SHA-256。每次请求重新读取认证文件；删除记录或令牌过期立即失效，包括已登录工作台的 Cookie。初始化生成一个 human、两个不同成员的 agent，默认有效 90 天；过期后需生成新随机令牌并更新哈希、期限和客户端配置。没有自动续期或用户管理 UI。
 
-`human` 可以查看工作台和登记目标；普通协商由 `agent` 通过自己的参与 Session 答复。只有 `needs_input` 的目标边界/信息缺口仍可使用 human 补充接口，普通协商的人工 resolve 会被拒绝。已分发的 human 令牌是一项人类管理权限，不能交给 Agent。MCP 工具列表不暴露裁决工具。
+`human` 管理项目和规划授权，维护目标/里程碑；项目授权的 Agent 也可维护规划，执行 Agent 可自行提出/认领任务。普通协商由参与 Agent 答复，只有 `needs_input` 可使用 human 补充接口。human 令牌不能交给 Agent；使用项目的 `planning_agents` 为 Agent 授权。MCP 不暴露人类裁决工具。
 
 允许的 Host 来自 `PREFLIGHT_ALLOWED_HOSTS`。存在 Origin 时必须与请求 URL 同源；没有跨域开放访问。远程代理需正确保留公开 Host/协议，使服务器看到的 URL 与浏览器 Origin 一致；部署后必须验证登录和协商读取，不能通过放宽为任意 Origin 解决代理配置问题。
 
 ## 3. 传输与工具契约
 
-`POST /mcp` 是无状态 Streamable HTTP endpoint。每个请求建立 SDK server/transport，业务 Session 存入 PostgreSQL，不使用 MCP 传输会话存业务数据。响应使用 JSON；不提供 SSE/GET 流，GET、DELETE 返回 405。客户端初始化后可以列出并调用八个工具。
+`POST /mcp` 是无状态 Streamable HTTP endpoint。每个请求建立 SDK server/transport，业务 Session 存入 PostgreSQL，不使用 MCP 传输会话存业务数据。响应使用 JSON；不提供 SSE/GET 流，GET、DELETE 返回 405。客户端可发现十四个工具。
 
 输入以 `src/domain/contracts.ts` 为准。字段长度、数组数量、UUID、URL 和枚举由 Zod 校验，顶层拒绝未知字段。所有写工具必须传 `request_id` UUID。
 
 | 工具 | 必填业务输入 | 关键可选输入 |
 | --- | --- | --- |
-| `preflight_get_project` | 空对象 | 无 |
-| `preflight_register_goal` | `title`、`objective`、`acceptance[]` | 无 |
-| `preflight_start_work` | `goal_id`、`title`、`agent_type` | `session_id`、`existing_change_id`、`likely_scope[]`、`branch`、`error_fingerprints[]` |
-| `preflight_get_context` | `change_id`、`session_id` | 无 |
-| `preflight_report_progress` | `change_id`、`session_id`、`expected_version`、`status`、`summary` | `likely_scope[]`、`verification`、`feedback`、`pr_url` |
+| `preflight_get_project` | 空对象 | `project_id` |
+| `preflight_register_goal` | `title`、`objective`、`acceptance[]` | `project_id`、`milestone_id`、`plan_state`、`priority`、`owner`、`due_date`、`kind` |
+| `preflight_start_work` | `goal_id`、`title`、`agent_type` | `mode`、`task_acceptance[]`、`goal_criteria_indices[]`、`depends_on_change_ids[]`，以及 `session_id`、`existing_change_id`、`likely_scope[]`、`branch`、`error_fingerprints[]` |
+| `preflight_get_context` | `goal_id` 或 `change_id` + `session_id` | 开工前也可读目标上下文 |
+| `preflight_report_progress` | `change_id`、`session_id`、`expected_version`、`status`、`summary` | 受管理任务还需 `lease_id,lease_epoch`；另有 `likely_scope[]`、`verification`、`feedback`、`pr_url` |
 | `preflight_publish_findings` | `change_id`、`session_id`、`findings[]` | 无 |
 | `preflight_propose_decision` | `change_id`、`session_id`、`question`、`context`、`category`、`urgency`、`options[]` | `recommendation`、`affected_change_ids[]`、`authority` |
 | `preflight_review_decision` | `change_id`、`session_id`、`decision_id`、`expected_version`、`stance`、`rationale`、`evidence` | `option_id`（接受时必填） |
 
-`likely_scope` 是仓库相对路径，不是已验证变更范围；拒绝绝对路径、`..`、`.env` 和 PEM 路径。`pr_url` 仅接受 HTTPS，服务器不抓取 URL 或验证 PR。Findings 类型为 `observation | hypothesis | root_cause | constraint | test_result`，每条带精简 `content` 和 `[0,1]` 置信度。
+`likely_scope` 是仓库相对路径，不是已验证变更范围；拒绝绝对路径、`..`、`.env` 和 PEM 路径。`pr_url` 仅接受 HTTPS，服务器不抓取或验证 PR。Findings 类型为 `observation | hypothesis | root_cause | constraint | test_result | failed_attempt | patch_summary`，含 content、置信度与第 13 节的条件/证据/纠正字段。
 
 决策类别为 `public_api_behavior | database_schema | auth_security | product_behavior | architecture_boundary | unknown`，紧迫程度为 `blocking | normal | low`。选项 2～5 个，具有唯一 `label`、`description`、可选 `pros[]` 与 `cons[]`。`recommendation` 如提供，必须是其中一个 label。
 
@@ -88,7 +91,9 @@ MCP 成功响应同时带文本内容和 `structuredContent`：
 
 领域错误返回 `isError: true`，文本内容为 `{ "error": { "code": "...", "message": "..." } }`。不要把错误响应当作成功上报；数据库失败没有离线待同步缓存。Agent 可以继续正常开发，恢复后使用同一请求 ID 重试尚未确认的写操作。
 
-## 4. 一次 Agent 工作流程
+## 4. 旧模式兼容流程
+
+以下示例保留默认项目中的旧调用方式，不需要租约。新项目必须使用受管理任务模式，见第 13 节；新客户端即使使用默认项目也应传 `mode`。
 
 1. `preflight_get_project {}`，查找已有 Goal。没有适当目标时，调用 `preflight_register_goal`，保存 `goal.id`。
 2. `preflight_start_work` 带该 Goal，保存 `session_id`、`change.id`、`change.version`。默认创建独立工作；只有确实要共同参与同一工作时才传 `existing_change_id`。
@@ -148,6 +153,10 @@ MCP 成功响应同时带文本内容和 `structuredContent`：
 
 | 表 | 内容 |
 | --- | --- |
+| `projects` | 项目、状态、规划授权、默认项目与版本 |
+| `milestones` | 项目内计划节点、日期、状态与版本 |
+| `work_claims` | 执行责任、Session、epoch、过期与释放时间 |
+| `change_dependencies` | 同项目内跨 Goal 的任务依赖 |
 | `goals` | 目标、验收条件、创建成员 |
 | `sessions` | 成员、Agent 类型、最近参与时间 |
 | `changes` | 目标关联、阶段、版本、声明范围、验证、PR URL |
@@ -172,11 +181,11 @@ MCP 成功响应同时带文本内容和 `structuredContent`：
 
 反馈可取 `same_work | related_but_distinct | not_related | intentional_parallel`。`not_related` 在该 Change 后续上下文中隐藏对应候选；其他反馈附带展示，不自动重写 Change 归属或身份。
 
-Context 在 repeatable-read 只读事务中读取：当前 Goal/Change、相关活跃工作、最近 30 条相关 Findings、明确关联的待定决策、最近 20 个已达成结果、能力标记与报告来源提醒。当前不做历史完成工作的知识检索，未实现 token 预算或语义编译。
+Context 在 repeatable-read 只读事务中读取：当前 Goal/Change、相关活跃工作、最近 30 条相关 Findings、明确关联的待定决策、最近 20 个已达成结果、能力标记与报告来源提醒。阶段 A 还提供任务的依赖/租约视图与最近 20 条目标历史知识，包含完成工作；完整历史检索用 `preflight_search_findings`。未实现 token 预算或语义编译。
 
 完全相同的待定决策提案只有在 question、context、category、options、recommendation、authority 一致，且影响范围有交集时才复用。选项、背景或建议不同则独立保存。不会根据语义相似度自动共享阻塞。
 
-项目快照限制最近 200 个 Goal、500 个 Change、500 个 Session、200 个 Decision、30 个 Event。超过限制时是截断视图，汇总数字也对应当前返回集合，不是全库总数。当前适合小团队试用，正式规模化需分页、稳定汇总和长期保留策略。
+项目快照限制按优先级/计划顺序的 200 个 Goal、最近 500 个 Change、500 个 Session、200 个 Decision、30 个 Event。超过限制时是截断视图，汇总数字对应返回集合，不是全库总数。当前适合小团队试用，正式规模化需分页、稳定汇总和长期保留策略。
 
 ## 8. 人类工作台与 REST
 
@@ -186,11 +195,11 @@ Context 在 repeatable-read 只读事务中读取：当前 Goal/Change、相关�
 | `GET /health` | 进程存活，**不检查数据库可用性** |
 | `POST /auth/login` | `{ token }`，仅接受 human 凭据 |
 | `POST /auth/logout` | 删除浏览器会话 |
-| `GET /api/v1/atlas` | 项目快照 |
+| `GET /api/v1/atlas` | 项目快照，可带 `project_id` |
 | `GET /api/v1/findings?scope=repo` | 当前仓库最近 Findings |
 | `GET /api/v1/findings?scope=change&change_id=...` | 当前仓库指定 Change 的 Findings |
 | `GET /api/v1/context?change_id=...&session_id=...` | 工作上下文 |
-| `POST /api/v1/tools/:action` | 与八个 MCP 工具共享输入/规则 |
+| `POST /api/v1/tools/:action` | 与十四个 MCP 工具共享输入/规则 |
 | `POST /api/v1/decisions/:id/resolve` | 仅 human，可补充 needs_input；拒绝普通协商 |
 
 Findings 查询必须显式选择 `scope=repo` 或 `scope=change`，后者要求 UUID `change_id`；拒绝未知/重复参数，不接受客户端自选仓库。返回 Findings 含 Change 标题、Session、成员、Agent 类型和置信度，按时间及 UUID 从新到旧，最多 100 条；`truncated` 标记是否有更多。已完成/放弃工作仍可读取 Findings，当前没有分页。工作台使用该独立接口切换范围，未选择时不加载。
@@ -224,14 +233,16 @@ npm run typecheck
 npm run lint
 npm test
 npm run test:integration
+npm run test:management
 npx playwright install chromium
 npm run test:ui
+npm run test:management-ui
 npm run build
 ```
 
 集成测试必须使用真实 PostgreSQL：两客户端初始化和发现工具、并发重试、共享发现脱敏、成员越权、显式共同参与、保留既有阻塞、不同背景/选项不合并、过期版本、逐工作共识、三轮上限与隔离证据、目标信息例外、独立阻塞、逐项验收、跨仓库隔离、跨域拒绝、令牌撤销、持久化重建。
 
-Chromium 测试跑真实工作台：登录、只读协商进展与 Agent 一致结果、登记计划目标、HTML 转义、浏览器不存令牌、手机宽度不溢出和退出。测试使用随机仓库隔离，并在 finally 清理。浏览器截图只写入被忽略的 `.preflight/screenshots/`。
+Chromium 测试跑真实工作台：登录、协商结果、项目/里程碑/目标/任务管理、列表/看板、依赖、认领、暂停/恢复、表单冲突、HTML 转义、浏览器不存令牌、手机布局和退出。集成与浏览器测试使用随机数据库 schema，并在 finally 清理。截图仅写入被忽略的 `.preflight/screenshots/`。
 
 修改业务规则时优先在领域层实现，增加覆盖真实失败场景的验证。不要为静态文案创建镜像测试。不要声称已有 Git/CI 事实、后台 Agent 调度或完整项目管理，除非对应接口、证据和集成验证已经实现。
 
@@ -247,11 +258,13 @@ Decision 视图附 `review_round`、`review_epoch`、`round_limit=3`、`current_
 
 ## 12. 演进顺序与原文
 
-下一轮先做实际团队试用和一种 Agent 客户端的稳定集成，再决定以下能力的顺序：
+按[v0.2 方案](plans/autonomous-collaboration-v0.2.md)推进。阶段 A 首版已实现，实际协议见第 13 节；B/C 的客户端可靠推进和事实验收尚未开发。管理 MCP 与工作台共享领域规则。
+
+后续结合真实项目试用继续扩展：
 
 1. Git/CI 事实通道，对报告完成增加独立状态与证据；只读 Observer 不执行 checkout/reset/rebase/merge。
-2. 目标优先级、负责人、子任务验收分配、人类验收与重新打开，减少第二块看板的维护。
-3. 历史 Findings 检索、明确保存的 Policy、上下文 token 预算和带证据的语义检索。
+2. 客户端可靠更新、自动心跳/恢复、协商超时、执行容量约束和完成任务重新打开。
+3. 明确保存的 Policy、上下文 token 预算和带证据的语义检索。
 4. 多实例会话、OAuth、分页、保留策略、推送和吞吐优化。
 
 原四份文档未经改写保存在 [archive](archive/)：
@@ -262,3 +275,68 @@ Decision 视图附 `review_round`、`review_epoch`、`round_limit=3`、`current_
 - [开发指南原稿](archive/devboard-dev-guide.md)
 
 原文用于理解设计背景。MVP 按用户明确的 MCP-first、替代 devboard 和完整共享闭环实施，不将原稿中的 Observer-first 阶段、计划技术栈或代码片段视为已经实现。
+
+## 13. 阶段 A：项目管理与任务认领
+
+### 13.1 管理对象与权限
+
+一个凭据的 `repo` 下可有多个 Project，Project 内有可选 Milestone 和多个 Goal，Goal 下拆 Change。业务责任 `owner` 与实际执行租约分开。`003_project_management.sql` 为存量仓库创建唯一默认项目、回填 Goal；保留原 UUID、关系、历史记录和旧模式工作。迁移可重复执行，不重建已有数据。
+
+只有 human 可以创建/编辑 Project 及其 `planning_agents[]` 授权列表。human 或名单中的 Agent 可修改目标计划和里程碑。执行 Agent 可提出任务和认领任务；任务创建者、参与者或 human 可编辑未认领任务，已有效认领的任务定义只能由当前租约持有人修改。共同参与者仍可发布发现、审议和协调；主租约不垄断知识署名。
+
+| 新工具 | 输入与行为 |
+| --- | --- |
+| `preflight_manage_project` | `operation=create/update`；create 必须 `title`，update 必须 `project_id, expected_version`；可设 `description,state,planning_agents[]` |
+| `preflight_manage_milestone` | `operation,project_id`；create 必须 `title`，update 必须 `milestone_id,expected_version`；可设 `title,due_date,state` |
+| `preflight_manage_goal` | `goal_id,expected_version`；可编辑 `title,objective,acceptance[],plan_state,priority,rank,milestone_id,owner,due_date` |
+| `preflight_manage_work` | `change_id,expected_version`；可编辑 `title,task_acceptance[],goal_criteria_indices[],depends_on_change_ids[]`；当前持有人还必须带 `session_id,lease_id,lease_epoch` |
+| `preflight_manage_claim` | `operation=claim/renew/release,change_id`；claim 必须 `expected_version`，可复用自己的 `session_id`；renew/release 必须 `session_id,lease_id,lease_epoch` |
+| `preflight_search_findings` | 可筛 `project_id,goal_id,change_id,finding_id,kind,query`；`limit` 默认 20、最大 50，响应 `next_cursor` 用于下一页 |
+
+以上写入均要求 UUID `request_id`。日期采用 `YYYY-MM-DD`，可用 null 清除管理接口的日期/责任人/里程碑。优先级 1 最高、4 最低；相同优先级按 `rank`、创建时间和 ID 稳定排序。Goal 计划状态为 `backlog/ready/paused/cancelled/archived`，Project 状态为 `active/archived`，Milestone 状态为 `planned/archived`。新 Goal 指定项目时默认 backlog，未授权 Agent 可以捕获待办，但不能擅自修改业务优先级或将其设为 ready。
+
+### 13.2 当前 Agent 闭环
+
+1. `preflight_get_project {project_id}` 查询计划与 `available_work[]`。也可在无 Session 时调用 `preflight_get_context {goal_id}`，获取目标、任务、历史知识。
+2. 优先认领适当的已有任务：`preflight_manage_claim {operation:"claim",change_id,expected_version,request_id}`，保存返回的 `session_id`、`change.version` 及 `claim.id/epoch/expires_at`。
+3. 尚无适当任务时调用 `preflight_start_work`，传 `mode:"propose"`（仅提出）或 `mode:"claim"`（提出并认领）、独立 `task_acceptance[]`、`goal_criteria_indices[]` 和可选 `depends_on_change_ids[]`。保留原必填字段 `goal_id,title,agent_type,request_id`。新项目不接受无 mode 的新工作。
+4. 读取上下文，执行并发布发现；持有人按当前版本上报阶段，必须额外传 `lease_id:claim.id,lease_epoch:claim.epoch`。同伴可以通过原 `existing_change_id` 机制参加同一任务，但不能凭参与身份代替当前责任租约更新阶段。
+5. 定期 `renew`，不用等待模型完成整段工作才续租。首版没有自动心跳适配器，客户端必须实现续租或主动调用；默认有效期 10 分钟，暂不可配置。完成前报告 verifying，在本地执行测试，再报告 completed。
+6. 不继续执行时 release。过期任务在下次读取时显示 expired，可被重新 claim；接管增加 epoch。旧租约上报被 `LEASE_REQUIRED` 拒绝。返回的幂等历史响应不证明租约仍有效，重试后应读取当前状态。
+
+认领与依赖校验沿用仓库级事务锁，同一任务只允许一个有效主责任租约；不提供语义去重或文件硬锁。依赖必须同 Project，可跨 Goal，环与自引用被拒绝。依赖任务需报告 completed 才可认领下游；该状态仍为 Agent 报告，不能等同于 Git/CI 事实。暂停/取消/归档禁止新执行与阶段推进（可安全放弃），不终止外部进程。续租本身不授权继续执行被暂停的计划。
+
+Goal/Project/Milestone 的 `version` 用于并发编辑。Goal 的 objective 或 acceptance 改变还增加 `definition_version`；旧任务映射需重新规划。任务定义修改增加自身 `definition_version`，绑定当前目标定义版本并清除旧验证。认领目标定义不匹配的任务返回 `REPLAN_REQUIRED`。
+
+### 13.3 子任务验收与汇总
+
+受管理任务完成要求有效租约、当前版本、没有未解决阻塞及每条 **task_acceptance** 的证据。verification 还必须包含当前 `definition_version` 和 `goal_definition_version`；保留 `head_sha,command,result,criteria[]` 和隔离证据。以下为格式示例，其中 SHA/证据必须由客户端换成实际验证记录：
+
+```json
+{
+  "head_sha": "<actual-40-character-commit-sha>",
+  "command": "npm test",
+  "result": "passed",
+  "definition_version": 1,
+  "goal_definition_version": 1,
+  "criteria": [{"index": 0, "passed": true, "evidence": "<actual-task-verification-evidence>"}]
+}
+```
+
+Project 快照包含 `projects,milestones,goals,changes,available_work`；可用 `project_id` 限定。任务视图附 `dependencies,blocked_reasons,claim,claim_state,available_to_claim`，目标附 `uncovered_criteria,task_count,completed_tasks,progress`。条件映射仅表示定义覆盖；目标的 reported_completed 还要求全体任务报告完成、当前定义版本条件全覆盖且无依赖/重规划阻塞。Milestone 汇总使用相同目标判定，`delivery_state` 固定为 `not_independently_verified`。
+
+当前快照有目标 200、任务 500、协商 200、动态 30 的上限；不是全量统计接口。阶段 B/C 再补分页、容量控制、可靠更新、超时、贡献/集成和正式目标验收。不把测试中格式合法的 fixture SHA 当作真实代码交付。
+
+### 13.4 历史知识
+
+Findings 增加 `failed_attempt/patch_summary`，可附 `detail,conditions,evidence[]` 与 `refutes_id/supersedes_id`。失败尝试必须有适用条件和至少一项证据。证据项含 description、可选 head_sha/command/result，均标为 Agent 报告；引用必须同仓库，保留原记录，不覆盖旧结论。
+
+检索按内容、细节和适用条件进行文字匹配，按创建时间/UUID 倒序游标分页。返回 `amended_by[]` 指向反驳/替代记录，来源成员、任务和 Agent 类型可追溯；已完成/放弃工作仍可检索。首次查询使用相同筛选后续带 `next_cursor`，服务器不做语义匹配或自动裁定真假。
+
+### 13.5 验证与当前限制
+
+`npm run test:management` 使用真实 PostgreSQL 和四个独立 MCP SDK 客户端（两个 Agent、human、跨仓库成员），覆盖存量迁移、授权、优先级、跨目标依赖/环、并发认领、重试、续期、时间推进后的真实过期校验、接管、旧租约拒绝、暂停/取消、子任务验收、知识分页/纠正及持久化。时间由领域层可注入时钟推进，不等待十分钟；数据库、HTTP、身份与协议都是真实运行。
+
+`npm run test:management-ui` 在真实 Chromium 中经 REST 操作规划，测试 fresh workspace、项目授权、里程碑、目标与任务/依赖、认领显示、暂停/筛选/恢复、有效租约下的编辑限制、并发编辑冲突保留输入、引号与 HTML 转义、手机看板。原 MCP 和浏览器协商测试继续运行。
+
+本次并非外部模型持续自主运行实验；客户端唤醒/恢复、自动心跳、缺席超时和 Git/CI 独立事实仍待实现。首次使用可在工作台创建项目与里程碑，登记 ready 目标，再让两个已配置 Agent 读取同一项目自行拆解并认领；系统不会替它们调度模型。

@@ -7,6 +7,7 @@ import type { Change } from '../src/db/schema.js';
 function change(id: string, title: string, scope: string[], fingerprints: string[] = []): Change {
   return { id, title, likely_scope: scope, error_fingerprints: fingerprints, repo: 'test/repo', goal_id: randomUUID(), created_by: 'alice',
     status: 'implementing', version: 1, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), summary: title,
+    lifecycle: 'legacy', task_acceptance: [], goal_criteria_indices: [], definition_version: 1, goal_definition_version: 1, claim_epoch: 0,
     branch: null, verification: null, pr_url: null };
 }
 describe('collaboration boundaries', () => {

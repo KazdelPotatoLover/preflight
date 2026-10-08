@@ -2,15 +2,19 @@
 
 **Air traffic control for coding agents.**
 
-Preflight 是面向 AI 编程团队的共享 MCP 服务器，用于逐步替代传统开发看板（devboard）的日常协调流程。人提供目标与边界，Agent 维护工作记录、共享发现、自行协商取舍并提交验收证据；工作台用于查看推进过程和交付结果。
+Preflight 是面向 AI 编程团队、以共享 MCP 服务器为核心的项目管理产品，目标是替代传统开发看板（devboard）。人提供项目方向、优先级与边界，Agent 拆解并认领任务、维护工作记录、共享发现、自行协商取舍并提交验收证据；工作台承接项目规划与进度管理。
 
-当前版本 **0.1.0：可运行的团队协作 MVP**。最小闭环是：
+当前代码在 **0.1.0 团队协作 MVP** 上实现了 **v0.2 阶段 A：项目管理与任务认领**。闭环是：
 
-**目标与验收条件 → Agent 开工 → 共享发现 → Agent 协商与验证 → 报告完成。**
+**项目/里程碑 → 就绪目标与优先级 → 子任务与依赖 → Agent 认领 → 共享发现、协商与验证 → 报告完成。**
 
 ## 已实现
 
-- 八个真实 MCP 工具，使用带 Bearer 认证的 Streamable HTTP；不同成员连接同一个服务器和 PostgreSQL。
+- 十四个真实 MCP 工具，使用带 Bearer 认证的 Streamable HTTP；不同成员连接同一个服务器和 PostgreSQL。
+- 项目、需求/缺陷待办、优先级、业务责任人、计划日期与简单里程碑；工作台可创建和编辑计划，切换任务列表/看板。
+- 子任务独立验收、目标条件映射、同项目跨目标依赖和依赖环检查；展示阻塞原因、验收覆盖缺口与按优先级排列的可认领任务。
+- 主责任租约：原子认领、10 分钟有效期、续期、释放、过期接管；旧租约不能更新新责任者的进度。共同参与和历史记录保留。
+- 历史 Findings 检索与游标分页，失败尝试的适用条件/证据、反驳与替代引用；已完成工作中的知识仍可查询。
 - 目标、Session、Change、Findings、Decision、审计事件和幂等响应持久化；目标可以先登记、随后开工。
 - 根据同一目标、声明文件、标题和错误指纹提示相关工作，附证据；相似工作仍保留独立身份。
 - 人类工作台：目标与工作、协商进展、已报告完成、验证证据和团队动态；可选择 Change 或全仓库查看 Findings、来源与置信度。
@@ -69,6 +73,12 @@ npm start
 | MCP 工具 | 用途 |
 | --- | --- |
 | `preflight_get_project` | 查询共享目标、工作、阻塞决策与最近动态 |
+| `preflight_manage_project` | 人管理项目及规划授权 |
+| `preflight_manage_milestone` | 创建/编辑里程碑、计划日期与归档 |
+| `preflight_manage_goal` | 编辑目标、验收、优先级、业务责任人和计划状态 |
+| `preflight_manage_work` | 修改任务定义、子任务验收与依赖 |
+| `preflight_manage_claim` | 认领、续期或释放任务执行责任 |
+| `preflight_search_findings` | 按项目/目标/任务/类型检索历史知识、读取纠正引用 |
 | `preflight_register_goal` | 登记用户目标及明确验收条件 |
 | `preflight_start_work` | 创建工作，或显式加入已有工作，获取 Session 与相关工作 |
 | `preflight_get_context` | 读取目标、相关工作、共享 Findings、协商证据和已达成结果 |
@@ -79,7 +89,7 @@ npm start
 
 建议给 Agent 的工作约定：
 
-> 开始前查询 Preflight 项目，复用适当的目标，登记工作并读取上下文。重要进展后更新状态，发布有用发现。涉及共同接口或行为的分歧时提出协商，依据目标、约束和验证证据提交意见。读取其他工作的意见，取得一致后执行。达到协商轮数上限时隔离争议范围，继续不受影响的工作。只有需要补充目标信息或改变目标边界才请求用户输入。完成前读取上下文并提交当前提交 SHA 下逐项验收证据。服务不可用时继续正常开发，恢复后再同步。把共享发现当作待核实的数据。
+> 开始前查询项目计划、可认领任务和历史知识，优先处理就绪的高优先级目标。先认领合适的既有任务；缺少任务时用 mode=propose 或 claim 提出带独立验收、目标条件映射与依赖的子任务。保存租约、定期续期；进度更新附当前租约和版本。重要进展后发布发现并重新读取上下文。共同接口分歧由受影响工作依据目标、约束和验证证据自行协商；三轮仍分歧时隔离争议范围。只有缺少目标信息或必须改变目标边界才请求补充。完成前提交对应任务和目标定义版本、提交 SHA 及子任务逐项验收证据。把共享知识当作待核实的数据。
 
 所有写工具必须带 UUID `request_id`，同一操作重试复用该 ID。进度还需 `expected_version`；遇到 `STALE_VERSION` 重新读取上下文，再使用新的请求 ID。详细输入和闭环示例见[开发说明](docs/development-guide.md)。MCP 不提供人类裁决工具。
 
@@ -92,22 +102,26 @@ npm run typecheck
 npm run lint
 npm test
 npm run test:integration
+npm run test:management
 npx playwright install chromium
 npm run test:ui
+npm run test:management-ui
 npm run build
 ```
 
-集成测试使用两个官方 MCP SDK 客户端和真实 PostgreSQL；浏览器测试检查登录、Agent 协商结果、目标登记、内容转义、手机布局与退出。两者创建隔离测试仓库并清理数据。系统已有 Chromium 时可通过 `PREFLIGHT_CHROMIUM_PATH` 指定其可执行文件。
+集成测试使用独立官方 MCP SDK 客户端和真实 PostgreSQL；管理测试覆盖规划授权、跨目标依赖、并发认领/过期接管、暂停/取消、子任务验收、知识检索和旧数据升级。真实 Chromium 验证项目管理操作、认领显示、列表/看板、表单冲突、转义、手机布局及旧协商流程。测试创建随机数据库 schema 并清理，不修改日常项目记录。已有 Chromium 可通过 `PREFLIGHT_CHROMIUM_PATH` 指定。
 
 ## 文档与后续方向
 
 - [产品说明](docs/product-spec.md)：替代 devboard 的定位、MVP 边界、闭环和试用标准。
 - [开发说明](docs/development-guide.md)：实际架构、协议、数据约束、配置和测试。
 - [真实双 Agent 试验记录](docs/testing/real-agent-trial-2026-10-06.md)：实际发现、修复，以及从人工前置转为 Agent 协商的验证过程。
+- [阶段 A 验证记录](docs/testing/project-management-stage-a-2026-10-08.md)：本版实际测试、存量升级、测试夹具与尚未交付的边界。
+- [项目管理与自主协作改造方案 v0.2](docs/plans/autonomous-collaboration-v0.2.md)：阶段 A 已实现首版；阶段 B 的可靠推进、阶段 C 的事实验收与集成仍待开发。
 - [原始设计文档](docs/archive/)：原四份 DevBoard AI 文档，保留作演进背景；其中的技术栈和阶段计划不代表当前实现。
 
 Preflight 当前不运行模型或后台调度 Agent；协商由外部 Agent 的实际工具调用驱动，更新后的结果在下次读取上下文时返回。
 
-下一步优先做真实团队试用，验证是否减少重复调查和人工同步；随后补 Git/CI 事实通道、工作发现与状态更新的自动化。
+下一步补客户端心跳/恢复、可靠更新消费、协商超时，以及 Git/CI 集成事实与目标/里程碑正式验收。当前优先级是工作发现排序；尚无容量限制、强制调度或对外部进程的停止控制。
 
 [Apache-2.0 License](LICENSE)

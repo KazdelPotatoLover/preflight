@@ -1,0 +1,151 @@
+import assert from 'node:assert/strict';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import postgres from 'postgres';
+import { serve } from '@hono/node-server';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { createApp } from '../src/app.js';
+import { connectDatabase } from '../src/db/client.js';
+import { migrate } from '../src/db/migrate.js';
+import * as t from '../src/db/schema.js';
+import { CollaborationService } from '../src/domain/service.js';
+import type { Credential } from '../src/config.js';
+
+if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL required');
+const testSchema = `management_${randomUUID().replaceAll('-', '')}`;
+const admin = postgres(process.env.DATABASE_URL, { max: 1, onnotice: () => {} });
+await admin.unsafe(`CREATE SCHEMA "${testSchema}"`);
+const connection = connectDatabase(process.env.DATABASE_URL, testSchema);
+let instant = Date.now();
+const service = new CollaborationService(connection.db, () => new Date(instant));
+const repo = `management/${randomUUID()}`;
+const tokens = Array.from({ length: 4 }, () => randomBytes(32).toString('hex'));
+const credentials: Credential[] = ['alice', 'bob', 'lead', 'outsider'].map((member, i) => ({ member, repo: i === 3 ? repo + '-foreign' : repo, role: i === 2 ? 'human' : 'agent', token_hash: createHash('sha256').update(tokens[i]!).digest('hex'), expires_at: new Date(Date.now() + 3600000).toISOString() }));
+const server = serve({ fetch: createApp({ service, credentials: () => credentials }).fetch, hostname: '127.0.0.1', port: 0 });
+if (!server.listening) await new Promise<void>(resolve => server.once('listening', resolve));
+const address = server.address(); assert(address && typeof address !== 'string');
+const base = `http://127.0.0.1:${address.port}`;
+const clients = ['alice', 'bob', 'lead', 'outsider'].map(name => new Client({ name, version: '1' }));
+const [alice, bob, lead, outsider] = clients as [Client, Client, Client, Client];
+type Work = { change: t.Change; session_id: string; claim?: typeof t.claims.$inferSelect };
+type Snapshot = Awaited<ReturnType<CollaborationService['project']>>;
+async function call<T>(by: Client, name: string, args: Record<string, unknown> = {}): Promise<T> {
+  const result = await by.callTool({ name, arguments: args }); assert(!result.isError, JSON.stringify(result.content));
+  return (result.structuredContent as { data: T }).data;
+}
+async function write<T>(by: Client, name: string, args: Record<string, unknown>) { return call<T>(by, name, { request_id: randomUUID(), ...args }); }
+async function fails(by: Client, name: string, args: Record<string, unknown>, code: string) {
+  const read = ['preflight_get_project', 'preflight_get_context', 'preflight_search_findings'].includes(name);
+  const result = await by.callTool({ name, arguments: read ? args : { request_id: randomUUID(), ...args } });
+  assert(result.isError, `Expected ${code}`);
+  const contents = result.content; assert(Array.isArray(contents));
+  const content = contents[0]; assert(content?.type === 'text');
+  assert.equal(JSON.parse(content.text).error.code, code);
+}
+const snapshot = (by = alice, project_id?: string) => call<Snapshot>(by, 'preflight_get_project', project_id ? { project_id } : {});
+try {
+  await connection.client.unsafe(readFileSync('migrations/001_initial.sql', 'utf8'));
+  await connection.client`CREATE TABLE schema_migrations(version INT PRIMARY KEY)`;
+  await connection.client`INSERT INTO schema_migrations VALUES (1)`;
+  const legacyGoal = randomUUID();
+  await connection.client`INSERT INTO goals(id,repo,title,objective,acceptance,created_by) VALUES(${legacyGoal},${repo},'Legacy goal','Preserve history','["old acceptance"]','lead')`;
+  await migrate(process.env.DATABASE_URL, testSchema); await migrate(process.env.DATABASE_URL, testSchema);
+  const legacy = await connection.client`SELECT g.id,g.plan_state,p.is_default FROM goals g JOIN projects p ON p.id=g.project_id WHERE g.id=${legacyGoal}`;
+  assert.equal(legacy[0]?.id, legacyGoal); assert.equal(legacy[0]?.plan_state, 'ready'); assert.equal(legacy[0]?.is_default, true);
+  console.log('✓ 001 upgrade/backfill twice preserves goal identity and creates one default project');
+  for (let i = 0; i < clients.length; i++) await clients[i]!.connect(new StreamableHTTPClientTransport(new URL(base + '/mcp'), { requestInit: { headers: { Authorization: `Bearer ${tokens[i]}` } } }));
+  const { project: p } = await write<{ project: typeof t.projects.$inferSelect }>(lead, 'preflight_manage_project', { operation: 'create', title: 'Release project', description: 'Two goals, independent task acceptance', planning_agents: ['alice'] });
+  const { milestone: m } = await write<{ milestone: typeof t.milestones.$inferSelect }>(alice, 'preflight_manage_milestone', { operation: 'create', project_id: p.id, title: 'First release', due_date: '2026-12-01' });
+  const createGoal = (title: string, priority: number, acceptance: string[]) => write<{ goal: typeof t.goals.$inferSelect }>(lead, 'preflight_register_goal', { project_id: p.id, title, objective: title, priority, plan_state: 'ready', acceptance, milestone_id: m.id, owner: 'lead' });
+  let { goal: g } = await createGoal('High priority goal', 1, ['Investigation evidence', 'Regression covered']);
+  const { goal: low } = await createGoal('Low priority goal', 4, ['Integration follows investigation']);
+  await fails(bob, 'preflight_manage_goal', { goal_id: g.id, expected_version: g.version, priority: 4 }, 'FORBIDDEN');
+  await fails(outsider, 'preflight_get_project', { project_id: p.id }, 'PROJECT_NOT_FOUND');
+  await fails(outsider, 'preflight_get_context', { goal_id: g.id }, 'GOAL_NOT_FOUND');
+  assert.deepEqual((await snapshot(alice, p.id)).goals.map(g => g.priority), [1, 4]);
+  const goalContext = await call<{ goal: typeof g; tasks: unknown[] }>(bob, 'preflight_get_context', { goal_id: g.id }); assert.equal(goalContext.tasks.length, 0);
+  console.log('✓ Project/milestone planning, delegation, sorted priorities, opening goal context and repository isolation');
+  const propose = (goalId: string, title: string, indices: number[], deps: string[] = []) => write<Work>(alice, 'preflight_start_work', { goal_id: goalId, title, agent_type: 'SDK-test', mode: 'propose', task_acceptance: [`${title} verified`], goal_criteria_indices: indices, depends_on_change_ids: deps });
+  const a = await propose(g.id, 'Investigate', [0]);
+  const b = await propose(g.id, 'Regression', [1]);
+  const downstream = await propose(low.id, 'Integration', [0], [a.change.id]);
+  await fails(bob, 'preflight_manage_claim', { operation: 'claim', change_id: downstream.change.id, expected_version: downstream.change.version }, 'DEPENDENCY_PENDING');
+  await fails(alice, 'preflight_manage_work', { change_id: a.change.id, expected_version: a.change.version, depends_on_change_ids: [downstream.change.id] }, 'DEPENDENCY_CYCLE');
+  let board = await snapshot(alice, p.id); assert.equal(board.available_work.length, 2); assert.deepEqual(board.goals.find(row => row.id === g.id)?.uncovered_criteria, []);
+  const request_id = randomUUID();
+  const contenders = await Promise.all([alice.callTool({ name: 'preflight_manage_claim', arguments: { request_id, operation: 'claim', change_id: a.change.id, expected_version: a.change.version, session_id: a.session_id } }), bob.callTool({ name: 'preflight_manage_claim', arguments: { request_id: randomUUID(), operation: 'claim', change_id: a.change.id, expected_version: a.change.version } })]);
+  assert.equal(contenders.filter(r => !r.isError).length, 1);
+  const winnerIndex = contenders.findIndex(r => !r.isError), winner = winnerIndex === 0 ? alice : bob, loser = winnerIndex === 0 ? bob : alice;
+  const claimed = (contenders[winnerIndex]!.structuredContent as { data: Work }).data; assert(claimed.claim);
+  if (winner === alice) assert.deepEqual(await call(alice, 'preflight_manage_claim', { request_id, operation: 'claim', change_id: a.change.id, expected_version: a.change.version, session_id: a.session_id }), claimed);
+  const leaseArgs = { change_id: claimed.change.id, session_id: claimed.session_id, lease_id: claimed.claim.id, lease_epoch: claimed.claim.epoch };
+  await fails(loser, 'preflight_manage_claim', { ...leaseArgs, operation: 'renew' }, 'LEASE_REQUIRED');
+  await write(winner, 'preflight_manage_claim', { ...leaseArgs, operation: 'renew' });
+  instant += 600001;
+  board = await snapshot(alice, p.id); assert.equal(board.changes.find(c => c.id === a.change.id)?.claim_state, 'expired');
+  const takeover = await write<Work>(loser, 'preflight_manage_claim', { operation: 'claim', change_id: a.change.id, expected_version: claimed.change.version }); assert(takeover.claim); assert.equal(takeover.claim.epoch, 2);
+  await fails(winner, 'preflight_report_progress', { ...leaseArgs, expected_version: takeover.change.version, status: 'implementing', summary: 'Stale worker' }, 'LEASE_REQUIRED');
+  await fails(winner, 'preflight_manage_work', { change_id: a.change.id, expected_version: takeover.change.version, title: 'Stale owner edit' }, 'LEASE_REQUIRED');
+  console.log('✓ Same-project cross-goal dependencies/cycles, atomic concurrent claim, retry, renew, expiry, takeover and stale-epoch fencing');
+  const current = async (id: string) => (await snapshot()).changes.find(c => c.id === id)!;
+  const goalEdit = async (state: string) => { ({ goal: g } = await write<{ goal: typeof g }>(lead, 'preflight_manage_goal', { goal_id: g.id, expected_version: g.version, plan_state: state })); };
+  await goalEdit('paused');
+  await fails(loser, 'preflight_report_progress', { change_id: a.change.id, session_id: takeover.session_id, lease_id: takeover.claim.id, lease_epoch: 2, expected_version: takeover.change.version, status: 'implementing', summary: 'Paused' }, 'GOAL_NOT_READY');
+  await fails(alice, 'preflight_manage_claim', { operation: 'claim', change_id: b.change.id, expected_version: b.change.version }, 'GOAL_NOT_READY');
+  await goalEdit('ready');
+  const finish = async (by: Client, w: Work) => {
+    assert(w.claim);
+    for (const status of ['implementing', 'verifying', 'completed']) {
+      const c = await current(w.change.id);
+      const input = { change_id: c.id, session_id: w.session_id, lease_id: w.claim.id, lease_epoch: w.claim.epoch, expected_version: c.version, status, summary: 'SDK scenario actual protocol evidence', ...(status === 'completed' ? { verification: { head_sha: 'a'.repeat(40), command: 'Fixture verification; not independent CI', result: 'passed', definition_version: c.definition_version, goal_definition_version: g.definition_version, criteria: [{ index: 0, passed: true, evidence: 'Own task acceptance satisfied' }] } } : {}) };
+      if (input.verification) {
+        await fails(by, 'preflight_report_progress', { ...input, verification: { ...input.verification, definition_version: c.definition_version + 1 } }, 'VERIFICATION_REQUIRED');
+        await fails(by, 'preflight_report_progress', { ...input, verification: { ...input.verification, goal_definition_version: g.definition_version + 1 } }, 'VERIFICATION_REQUIRED');
+      }
+      await write(by, 'preflight_report_progress', input);
+    }
+  };
+  await finish(loser, takeover);
+  board = await snapshot(alice, p.id); assert.notEqual(board.goals.find(row => row.id === g.id)?.progress, 'reported_completed');
+  assert(board.available_work.some(c => c.id === downstream.change.id));
+  const bClaim = await write<Work>(bob, 'preflight_manage_claim', { operation: 'claim', change_id: b.change.id, expected_version: b.change.version }); await finish(bob, bClaim);
+  board = await snapshot(alice, p.id); assert.equal(board.goals.find(row => row.id === g.id)?.progress, 'reported_completed');
+  assert.equal(board.milestones[0]?.reported_completed_goals, 1); assert.equal(board.milestones[0]?.delivery_state, 'not_independently_verified');
+  const { goal: partial } = await createGoal('Incomplete mapping', 2, ['Covered', 'Uncovered']);
+  const partialTask = await propose(partial.id, 'Partial verification', [0]);
+  const partialClaim = await write<Work>(alice, 'preflight_manage_claim', { operation: 'claim', change_id: partialTask.change.id, expected_version: partialTask.change.version }); await finish(alice, partialClaim);
+  board = await snapshot(alice, p.id);
+  assert.deepEqual(board.goals.find(row => row.id === partial.id)?.uncovered_criteria, [1]);
+  assert.notEqual(board.goals.find(row => row.id === partial.id)?.progress, 'reported_completed');
+  assert.equal(board.milestones[0]?.reported_completed_goals, 1, 'Completed tasks cannot hide uncovered goal acceptance in milestone progress');
+  console.log('✓ Paused plans cannot execute, subtasks use own acceptance, partial goal remains unfinished, dependency readiness and truthful milestone summary');
+  const finding = await write<{ findings: (typeof t.findings.$inferSelect)[] }>(alice, 'preflight_publish_findings', { change_id: a.change.id, session_id: a.session_id, findings: [{ kind: 'failed_attempt', content: 'Retry-only approach failed', confidence: 0.9, conditions: 'Under pool exhaustion', detail: 'Reproduction remained failing', evidence: [{ description: 'Reproduced timeout', result: 'failed', head_sha: 'b'.repeat(40) }] }] });
+  const correction = await write<{ findings: (typeof t.findings.$inferSelect)[] }>(bob, 'preflight_publish_findings', { change_id: b.change.id, session_id: bClaim.session_id, findings: [{ kind: 'observation', content: 'Retry can work after capacity recovery', confidence: 0.8, refutes_id: finding.findings[0]!.id }] });
+  const result = await call<{ findings: (typeof t.findings.$inferSelect & { amended_by: { id: string }[] })[]; next_cursor: string | null }>(bob, 'preflight_search_findings', { project_id: p.id, query: 'Retry', limit: 1 }); assert(result.next_cursor);
+  const next = await call<typeof result>(bob, 'preflight_search_findings', { project_id: p.id, query: 'Retry', limit: 1, cursor: result.next_cursor });
+  assert.notEqual(result.findings[0]?.id, next.findings[0]?.id);
+  await fails(bob, 'preflight_search_findings', { cursor: Buffer.from(JSON.stringify({ at: '2026-10-08T00:00:00Z', id: '-'.repeat(36) })).toString('base64url') }, 'VALIDATION_ERROR');
+  const detail = await call<typeof result>(bob, 'preflight_search_findings', { finding_id: finding.findings[0]!.id }); assert.equal(detail.findings[0]?.detail, 'Reproduction remained failing'); assert.equal(detail.findings[0]?.amended_by[0]?.id, correction.findings[0]?.id);
+  assert.equal((await call<typeof result>(outsider, 'preflight_search_findings', { query: 'Retry' })).findings.length, 0);
+  await fails(alice, 'preflight_publish_findings', { change_id: a.change.id, session_id: a.session_id, findings: [{ kind: 'failed_attempt', content: 'Unsupported claim', confidence: 1 }] }, 'VALIDATION_ERROR');
+  console.log('✓ Durable failure knowledge, conditions/evidence, completed-work retrieval, cursor paging, corrections and no cross-repository leak');
+  const replan = await propose(g.id, 'Unclaimed follow-up', [0]);
+  ({ goal: g } = await write<{ goal: typeof g }>(lead, 'preflight_manage_goal', { goal_id: g.id, expected_version: g.version, acceptance: ['New investigation', 'New regression'] }));
+  await fails(bob, 'preflight_manage_claim', { operation: 'claim', change_id: downstream.change.id, expected_version: downstream.change.version }, 'DEPENDENCY_PENDING');
+  await fails(alice, 'preflight_manage_claim', { operation: 'claim', change_id: replan.change.id, expected_version: replan.change.version, session_id: replan.session_id }, 'REPLAN_REQUIRED');
+  const updated = await write<{ change: t.Change }>(alice, 'preflight_manage_work', { change_id: replan.change.id, expected_version: replan.change.version, task_acceptance: ['New check'], goal_criteria_indices: [0] });
+  const lease = await write<Work>(alice, 'preflight_manage_claim', { operation: 'claim', change_id: replan.change.id, expected_version: updated.change.version, session_id: replan.session_id }); assert(lease.claim);
+  await write(alice, 'preflight_manage_claim', { operation: 'release', change_id: lease.change.id, session_id: lease.session_id, lease_id: lease.claim.id, lease_epoch: lease.claim.epoch });
+  assert.equal((await current(replan.change.id)).claim_state, 'unclaimed');
+  await goalEdit('cancelled'); assert.equal((await snapshot()).available_work.filter(c => c.goal_id === g.id).length, 0);
+  await fails(lead, 'preflight_manage_goal', { goal_id: g.id, expected_version: 1, priority: 2 }, 'STALE_VERSION');
+  const recreated = new CollaborationService(connection.db, () => new Date(instant));
+  assert.equal((await recreated.project({ member: 'lead', role: 'human', repo }, p.id)).goals.find(row => row.id === g.id)?.plan_state, 'cancelled');
+  console.log('✓ Goal definition invalidates old evidence/mappings, replan/release, cancellation, optimistic planning updates and persistence');
+} finally {
+  await Promise.allSettled(clients.map(client => client.close()));
+  await new Promise<void>(resolve => server.close(() => resolve()));
+  await connection.client.end();
+  await admin.unsafe(`DROP SCHEMA "${testSchema}" CASCADE`); await admin.end();
+}

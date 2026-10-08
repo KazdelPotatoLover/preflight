@@ -1,15 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { and, eq, inArray, desc, sql } from 'drizzle-orm';
+import { and, eq, inArray, desc, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Database, QueryDatabase } from '../db/client.js';
 import * as t from '../db/schema.js';
 import { canonical, DomainError, redact, schemas, type Action, type Actor } from './contracts.js';
 import { relatedWork } from './related.js';
+import { Management } from './management.js';
 const now = () => new Date().toISOString();
 const openDecisionStatuses = ['negotiating', 'deferred', 'needs_input'];
 
 export class CollaborationService {
-  constructor(public db: Database) {}
+  constructor(public db: Database, private clock: () => Date = () => new Date()) {}
   private async change(db: QueryDatabase, actor: Actor, id: string) {
     const [change] = await db.select().from(t.changes).where(and(eq(t.changes.id, id), eq(t.changes.repo, actor.repo)));
     if (!change) throw new DomainError('CHANGE_NOT_FOUND', 'Change was not found', 404);
@@ -48,10 +49,18 @@ export class CollaborationService {
   }
   async execute(actor: Actor, action: Action, raw: unknown): Promise<unknown> {
     const parsed = schemas[action].parse(raw);
-    if (action === 'preflight_get_project') return this.project(actor);
+    if (action === 'preflight_get_project') return this.project(actor, schemas.preflight_get_project.parse(parsed).project_id);
+    if (action === 'preflight_search_findings') return this.db.transaction(db => new Management(db, actor, this.clock).search(parsed), { isolationLevel: 'repeatable read', accessMode: 'read only' });
     if (action === 'preflight_get_context') {
       const input = schemas.preflight_get_context.parse(parsed);
-      return this.context(actor, input.change_id, input.session_id);
+      if (input.goal_id) {
+        return this.db.transaction(async db => {
+          const management = new Management(db, actor, this.clock), goal = await management.goal(input.goal_id!);
+          const candidates = await db.select().from(t.changes).where(and(eq(t.changes.repo, actor.repo), eq(t.changes.goal_id, goal.id)));
+          return { goal, project: await management.project(goal.project_id), current_change: null, tasks: await management.workViews(candidates), knowledge: await management.search({ goal_id: goal.id, limit: 20 }), warnings: ['Progress and evidence are agent reports.'] };
+        }, { isolationLevel: 'repeatable read', accessMode: 'read only' });
+      }
+      return this.context(actor, input.change_id!, input.session_id!);
     }
     const requestId = (parsed as { request_id: string }).request_id;
     const hash = createHash('sha256').update(canonical(parsed)).digest('hex');
@@ -70,10 +79,17 @@ export class CollaborationService {
     });
   }
   private async perform(db: QueryDatabase, actor: Actor, action: Action, input: unknown): Promise<Record<string, unknown>> {
+    const management = new Management(db, actor, this.clock);
+    if (['preflight_manage_project', 'preflight_manage_milestone', 'preflight_manage_goal', 'preflight_manage_work', 'preflight_manage_claim'].includes(action)) return management.execute(action, input);
     switch (action) {
       case 'preflight_register_goal': {
         const data = schemas.preflight_register_goal.parse(input);
-        const [goal] = await db.insert(t.goals).values({ id: randomUUID(), repo: actor.repo, title: data.title,
+        const project = data.project_id ? await management.project(data.project_id) : await management.defaultProject();
+        if (project.state !== 'active') throw new DomainError('PROJECT_ARCHIVED', 'Cannot add goals to an archived project', 409);
+        if (actor.role === 'agent' && (data.plan_state || data.priority || data.milestone_id || data.owner || data.due_date)) management.planning(project);
+        if (data.milestone_id) await management.milestone(data.milestone_id, project.id);
+        const [goal] = await db.insert(t.goals).values({ id: randomUUID(), repo: actor.repo, project_id: project.id, milestone_id: data.milestone_id,
+          plan_state: data.plan_state ?? (data.project_id ? 'backlog' : 'ready'), priority: data.priority, owner: data.owner, due_date: data.due_date, kind: data.kind, title: data.title,
           objective: data.objective, acceptance: data.acceptance, created_by: actor.member }).returning();
         if (!goal) throw new Error('Missing inserted goal');
         await this.record(db, actor, 'goal.created', goal.id, { title: goal.title });
@@ -83,6 +99,10 @@ export class CollaborationService {
         const data = schemas.preflight_start_work.parse(input);
         const [goal] = await db.select().from(t.goals).where(and(eq(t.goals.id, data.goal_id), eq(t.goals.repo, actor.repo)));
         if (!goal) throw new DomainError('GOAL_NOT_FOUND', 'Goal was not found', 404);
+        const project = await management.project(goal.project_id);
+        if (project.state !== 'active' || ['paused', 'cancelled', 'archived'].includes(goal.plan_state)) throw new DomainError('GOAL_NOT_READY', 'Goal is not available for new work', 409);
+        if (data.mode && !data.existing_change_id && (!data.task_acceptance || !data.goal_criteria_indices)) throw new DomainError('VALIDATION_ERROR', 'Managed tasks require task acceptance and goal criteria mapping');
+        if (!data.mode && !data.existing_change_id && !project.is_default) throw new DomainError('VALIDATION_ERROR', 'Use managed task mode');
         let session;
         if (data.session_id) {
           [session] = await db.select().from(t.sessions).where(and(eq(t.sessions.id, data.session_id), eq(t.sessions.repo, actor.repo), eq(t.sessions.member, actor.member)));
@@ -93,23 +113,41 @@ export class CollaborationService {
         if (!session) throw new Error('Missing session');
         let change;
         if (data.existing_change_id) {
+          if (data.mode === 'propose') throw new DomainError('VALIDATION_ERROR', 'Propose creates a new task');
           change = await this.change(db, actor, data.existing_change_id);
           if (change.goal_id !== goal.id || ['completed', 'abandoned'].includes(change.status)) throw new DomainError('CONFLICT', 'Can only join active work under this goal', 409);
         } else {
           [change] = await db.insert(t.changes).values({ id: randomUUID(), repo: actor.repo, goal_id: goal.id,
             title: data.title, created_by: actor.member, status: 'probable', likely_scope: data.likely_scope,
-            error_fingerprints: data.error_fingerprints, branch: data.branch, summary: data.title }).returning();
+            error_fingerprints: data.error_fingerprints, branch: data.branch, summary: data.title,
+            lifecycle: data.mode ? 'managed' : 'legacy', task_acceptance: data.task_acceptance ?? [], goal_criteria_indices: data.goal_criteria_indices ?? [], goal_definition_version: goal.definition_version }).returning();
         }
         if (!change) throw new Error('Missing change');
+        if (change.lifecycle === 'managed') {
+          management.criteria(change.goal_criteria_indices, goal);
+          if (!data.existing_change_id) await management.setDependencies(change, data.depends_on_change_ids);
+        }
         await db.insert(t.changeSessions).values({ change_id: change.id, session_id: session.id }).onConflictDoNothing();
         await db.update(t.sessions).set({ last_seen_at: now() }).where(eq(t.sessions.id, session.id));
         await this.record(db, actor, data.existing_change_id ? 'change.joined' : 'change.created', change.id, { goal_id: goal.id, session_id: session.id });
+        const claimed = data.mode === 'claim' ? await management.claim(change, session.id) : null;
+        if (claimed) change = claimed.change;
         const candidates = await db.select().from(t.changes).where(eq(t.changes.repo, actor.repo));
-        return { session_id: session.id, change, related_work: relatedWork(change, candidates), blocking: (await this.blocking(db, actor, change.id)).length > 0 };
+        return { ...(claimed ? { claim: claimed.claim } : {}), session_id: session.id, change, related_work: relatedWork(change, candidates), blocking: (await this.blocking(db, actor, change.id)).length > 0 };
       }
       case 'preflight_report_progress': {
         const data = schemas.preflight_report_progress.parse(input);
         const change = await this.participant(db, actor, data.change_id, data.session_id);
+        if (data.status !== 'abandoned') await management.ready(await management.goal(change.goal_id));
+        if (change.lifecycle === 'managed') {
+          const goal = await management.goal(change.goal_id);
+          await management.requireLease(change, data.session_id, data.lease_id, data.lease_epoch);
+          if (data.status !== 'abandoned') {
+            await management.ready(goal);
+            const [view] = await management.workViews([change]);
+            if (view!.blocked_reasons.length) throw new DomainError('WORK_BLOCKED', view!.blocked_reasons.join(', '), 409);
+          }
+        }
         if (data.expected_version !== change.version) throw new DomainError('STALE_VERSION', `Refresh context; current version is ${change.version}`, 409);
         const transitions: Record<string, string[]> = {
           probable: ['probable', 'implementing', 'abandoned'],
@@ -130,9 +168,11 @@ export class CollaborationService {
           if (deferredIds.some(id => !isolation.some(i => i.decision_id === id))) throw new DomainError('ISOLATION_REQUIRED', 'Provide isolation or degradation evidence for every deferred blocker', 409);
           const [goal] = await db.select().from(t.goals).where(eq(t.goals.id, change.goal_id));
           const v = data.verification;
-          if (!goal || !v || v.result !== 'passed' || v.criteria.length !== goal.acceptance.length ||
-            new Set(v.criteria.map(c => c.index)).size !== goal.acceptance.length ||
-            v.criteria.some(c => !c.passed || c.index >= goal.acceptance.length)) {
+          const acceptance = change.lifecycle === 'managed' ? change.task_acceptance : goal?.acceptance ?? [];
+          if (change.lifecycle === 'managed' && (v?.definition_version !== change.definition_version || v?.goal_definition_version !== goal?.definition_version)) throw new DomainError('VERIFICATION_REQUIRED', 'Verification must match current task and goal definitions');
+          if (!goal || !v || v.result !== 'passed' || v.criteria.length !== acceptance.length ||
+            new Set(v.criteria.map(c => c.index)).size !== acceptance.length ||
+            v.criteria.some(c => !c.passed || c.index >= acceptance.length)) {
             throw new DomainError('VERIFICATION_REQUIRED', 'Completion requires a passing SHA-specific verification for every acceptance criterion');
           }
           for (const isolated of isolation) await this.record(db, actor, 'decision.scope_isolated', isolated.decision_id,
@@ -148,6 +188,7 @@ export class CollaborationService {
           verification: data.verification ? { ...data.verification, source: 'agent_report' as const } : null,
           pr_url: data.pr_url ?? change.pr_url, version: change.version + 1, updated_at: now(),
         }).where(eq(t.changes.id, change.id)).returning();
+        if (change.lifecycle === 'managed' && ['completed', 'abandoned'].includes(data.status)) await db.update(t.claims).set({ released_at: this.clock().toISOString() }).where(and(eq(t.claims.change_id, change.id), isNull(t.claims.released_at)));
         await db.update(t.sessions).set({ last_seen_at: now() }).where(eq(t.sessions.id, data.session_id));
         await this.record(db, actor, 'change.updated', change.id, { status: data.status, source: 'agent_report', version: change.version + 1 });
         return { change: updated, status_source: 'agent_report' };
@@ -155,6 +196,13 @@ export class CollaborationService {
       case 'preflight_publish_findings': {
         const data = schemas.preflight_publish_findings.parse(input);
         await this.participant(db, actor, data.change_id, data.session_id);
+        for (const f of data.findings) {
+          if (f.kind === 'failed_attempt' && (!f.conditions || !f.evidence.length)) throw new DomainError('VALIDATION_ERROR', 'Failed attempts require conditions and evidence');
+          for (const id of [f.refutes_id, f.supersedes_id].filter(Boolean)) {
+            const [referenced] = await db.select().from(t.findings).where(and(eq(t.findings.id, id!), eq(t.findings.repo, actor.repo)));
+            if (!referenced) throw new DomainError('FINDING_NOT_FOUND', 'Referenced finding not found', 404);
+          }
+        }
         const findings = await db.insert(t.findings).values(data.findings.map(f => ({ ...f, id: randomUUID(), repo: actor.repo, change_id: data.change_id, session_id: data.session_id }))).returning();
         await db.update(t.sessions).set({ last_seen_at: now() }).where(eq(t.sessions.id, data.session_id));
         await this.record(db, actor, 'findings.published', data.change_id, { count: findings.length });
@@ -267,7 +315,9 @@ export class CollaborationService {
       const blocking = pending.filter(d => d.urgency === 'blocking');
       const terminal = ['completed', 'abandoned'].includes(change.status);
       const [goal] = await db.select().from(t.goals).where(eq(t.goals.id, change.goal_id));
-      return { version: '1', generated_at: now(), repo: actor.repo, goal, current_change: change,
+      const management = new Management(db, actor, this.clock);
+      const [work] = await management.workViews([change]);
+      return { task: work, knowledge: await management.search({ goal_id: change.goal_id, limit: 20 }), version: '1', generated_at: now(), repo: actor.repo, goal, current_change: change,
         related_work: related, findings, pending_decisions: pending,
         resolved_decisions: views.filter(d => ['agent_resolved', 'human_resolved'].includes(d.status)).slice(0, 20),
         blocking: !terminal && blocking.length > 0, recommended_action: terminal ? 'continue' : pending.some(d => d.status === 'needs_input') ? 'clarify_goal'
@@ -277,32 +327,46 @@ export class CollaborationService {
       };
     }, { isolationLevel: 'repeatable read', accessMode: 'read only' });
   }
-  async project(actor: Actor) {
+  async project(actor: Actor, projectId?: string) {
     return this.db.transaction(async db => {
-      const [goals, changes, sessions, decisions, events] = await Promise.all([
-        db.select().from(t.goals).where(eq(t.goals.repo, actor.repo)).orderBy(desc(t.goals.created_at)).limit(200),
-        db.select().from(t.changes).where(eq(t.changes.repo, actor.repo)).orderBy(desc(t.changes.updated_at)).limit(500),
+      const management = new Management(db, actor, this.clock);
+      if (projectId) await management.project(projectId);
+      const [allGoals, allChanges, sessions, decisions, events, projects, milestones] = await Promise.all([
+        db.select().from(t.goals).where(and(eq(t.goals.repo, actor.repo), projectId ? eq(t.goals.project_id, projectId) : undefined)).orderBy(t.goals.priority, t.goals.rank, t.goals.created_at, t.goals.id).limit(200),
+        db.select().from(t.changes).where(and(eq(t.changes.repo, actor.repo), projectId ? inArray(t.changes.goal_id, db.select({ id: t.goals.id }).from(t.goals).where(and(eq(t.goals.repo, actor.repo), eq(t.goals.project_id, projectId)))) : undefined)).orderBy(desc(t.changes.updated_at)).limit(500),
         db.select().from(t.sessions).where(eq(t.sessions.repo, actor.repo)).limit(500),
         db.select().from(t.decisions).where(eq(t.decisions.repo, actor.repo)).orderBy(desc(t.decisions.created_at)).limit(200),
         db.select().from(t.events).where(eq(t.events.repo, actor.repo)).orderBy(desc(t.events.created_at)).limit(30),
+        db.select().from(t.projects).where(eq(t.projects.repo, actor.repo)).orderBy(t.projects.created_at),
+        db.select().from(t.milestones).where(eq(t.milestones.repo, actor.repo)).orderBy(t.milestones.created_at),
       ]);
-      const views = await this.decisionViews(db, actor, decisions);
+      const goals = allGoals.filter(g => !projectId || g.project_id === projectId).sort((a,b) => a.priority - b.priority || a.rank - b.rank || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+      const goalsSet = new Set(goals.map(g => g.id));
+      const changes = allChanges.filter(c => goalsSet.has(c.goal_id));
+      const changeIds = new Set(changes.map(c => c.id));
+      const views = (await this.decisionViews(db, actor, decisions)).filter(d => !projectId || d.required_change_ids.some(id => changeIds.has(id)));
       const blockers = new Set(views.filter(d => openDecisionStatuses.includes(d.status) && d.urgency === 'blocking').flatMap(d => d.required_change_ids));
-      const work = changes.map(c => {
+      const work = (await management.workViews(changes)).map(c => {
         const waiting = !['completed', 'abandoned'].includes(c.status) && blockers.has(c.id);
         return { ...c, waiting_for_coordination: waiting, waiting_for_decision: waiting, status_source: 'agent_report' };
       });
-      return { repo: actor.repo, actor: { member: actor.member, role: actor.role },
-        goals: goals.map(g => {
+      const goalViews = goals.map(g => {
           const children = work.filter(c => c.goal_id === g.id);
-          return { ...g, progress: !children.length ? 'planned' : children.every(c => c.status === 'completed') ? 'reported_completed' : children.some(c => c.waiting_for_coordination) ? 'coordinating' : 'active' };
-        }), changes: work, sessions, decisions: views, events,
+          const covered = new Set(children.filter(c => c.status !== 'abandoned' && c.goal_definition_version === g.definition_version).flatMap(c => c.lifecycle === 'managed' ? c.goal_criteria_indices : g.acceptance.map((_, i) => i)));
+          return { ...g, uncovered_criteria: g.acceptance.map((_,i) => i).filter(i => !covered.has(i)), completed_tasks: children.filter(c => c.status === 'completed').length, task_count: children.length, progress: g.plan_state !== 'ready' ? g.plan_state : !children.length ? 'planned' : children.every(c => c.status === 'completed' && !c.blocked_reasons.length) && covered.size === g.acceptance.length ? 'reported_completed' : children.some(c => c.waiting_for_coordination) ? 'coordinating' : 'active' };
+        });
+      return { projects, selected_project_id: projectId ?? null, milestones: milestones.filter(m => !projectId || m.project_id === projectId).map(m => {
+          const items = goalViews.filter(g => g.milestone_id === m.id);
+          return { ...m, goal_count: items.length, reported_completed_goals: items.filter(g => g.progress === 'reported_completed').length, delivery_state: 'not_independently_verified' };
+        }), repo: actor.repo, actor: { member: actor.member, role: actor.role },
+        goals: goalViews, changes: work, sessions, decisions: views, events,
+        available_work: work.filter(c => c.available_to_claim).sort((a,b) => goals.findIndex(g => g.id === a.goal_id) - goals.findIndex(g => g.id === b.goal_id)),
         summary: { goals: goals.length, active_changes: changes.filter(c => !['completed', 'abandoned'].includes(c.status)).length,
-          pending_decisions: decisions.filter(d => openDecisionStatuses.includes(d.status)).length,
-          negotiating_decisions: decisions.filter(d => d.status === 'negotiating').length,
-          deferred_decisions: decisions.filter(d => d.status === 'deferred').length,
-          needs_input_decisions: decisions.filter(d => d.status === 'needs_input').length,
-          resolved_decisions: decisions.filter(d => ['agent_resolved', 'human_resolved'].includes(d.status)).length,
+          pending_decisions: views.filter(d => openDecisionStatuses.includes(d.status)).length,
+          negotiating_decisions: views.filter(d => d.status === 'negotiating').length,
+          deferred_decisions: views.filter(d => d.status === 'deferred').length,
+          needs_input_decisions: views.filter(d => d.status === 'needs_input').length,
+          resolved_decisions: views.filter(d => ['agent_resolved', 'human_resolved'].includes(d.status)).length,
           completed_changes: changes.filter(c => c.status === 'completed').length },
         limits: { goals: 200, changes: 500, decisions: 200, events: 30 },
       };

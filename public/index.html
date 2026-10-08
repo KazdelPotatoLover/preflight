@@ -44,7 +44,7 @@
           <div class="heading">
             <div>
               <div class="eyebrow">TEAM WORKSPACE</div>
-              <h1>团队工作台</h1>
+              <h1>项目工作台</h1>
               <p id="repo" class="muted"></p>
             </div>
             <div class="heading-actions">
@@ -53,6 +53,11 @@
               ><button id="new-goal" class="primary">＋ 登记目标</button>
             </div>
           </div>
+          <section class="planning-panel" aria-labelledby="planning-heading">
+            <div class="section-heading"><h2 id="planning-heading">项目计划</h2><div class="planning-actions"><button id="new-project" class="secondary">新建项目</button><button id="edit-project" class="secondary">编辑项目</button><button id="new-milestone" class="secondary">新建里程碑</button></div></div>
+            <label for="project-select">当前项目</label><select id="project-select"><option value="">全部项目</option></select>
+            <p id="project-description" class="small muted"></p><div id="milestones"></div>
+          </section>
           <div id="metrics" class="metrics"></div>
           <div class="columns">
             <section class="work-section">
@@ -66,7 +71,8 @@
                 ><button data-filter="waiting">协商中</button
                 ><button data-filter="completed">已完成</button>
               </div>
-              <div id="goals"></div>
+              <div class="planning-actions"><label for="plan-filter">目标状态</label><select id="plan-filter"><option value="all">全部计划</option><option value="backlog">待办</option><option value="ready">就绪</option><option value="paused">暂停</option><option value="cancelled">取消</option><option value="archived">归档</option></select><label for="work-view">任务视图</label><select id="work-view"><option value="list">列表</option><option value="board">看板</option></select></div>
+              <div id="task-board" hidden></div><div id="goals"></div>
               <section class="findings-section" aria-labelledby="findings-heading">
                 <div class="section-heading">
                   <h2 id="findings-heading">团队发现</h2>
@@ -114,12 +120,12 @@
     <dialog id="goal-dialog">
       <form id="goal-form">
         <div class="section-heading">
-          <h2>登记团队目标</h2>
+          <h2 id="goal-dialog-title">登记团队目标</h2>
           <button type="button" id="close-goal" class="quiet" aria-label="关闭">
             ✕
           </button>
         </div>
-        <label for="goal-title">目标名称</label
+        <label for="goal-project">所属项目</label><select id="goal-project" name="project_id" required></select><label for="goal-state">计划状态</label><select id="goal-state" name="plan_state"><option value="backlog">待办</option><option value="ready">就绪</option><option value="paused">暂停</option><option value="cancelled">取消</option><option value="archived">归档</option></select><label for="goal-priority">优先级</label><select id="goal-priority" name="priority"><option value="1">最高</option><option value="2" selected>高</option><option value="3">普通</option><option value="4">低</option></select><label for="goal-owner">业务责任人</label><input id="goal-owner" name="owner" maxlength="100" /><label for="goal-date">计划日期</label><input id="goal-date" name="due_date" type="date" /><label for="goal-milestone">里程碑</label><select id="goal-milestone" name="milestone_id"></select><label for="goal-kind">需求类型</label><select id="goal-kind" name="kind"><option value="requirement">需求</option><option value="bug">缺陷</option></select><label for="goal-title">目标名称</label
         ><input
           id="goal-title"
           name="title"
@@ -143,5 +149,6 @@
         ><button class="primary">保存目标</button>
       </form>
     </dialog>
+    <dialog id="manage-dialog"><form id="manage-form"><div class="section-heading"><h2 id="manage-heading"></h2><button type="button" id="close-manage" class="quiet" aria-label="关闭管理表单">✕</button></div><div id="manage-fields"></div><button class="primary">保存</button></form></dialog>
   </body>
 </html>

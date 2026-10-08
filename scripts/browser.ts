@@ -3,15 +3,19 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { serve } from '@hono/node-server';
 import { chromium, type Browser } from 'playwright';
-import { eq, inArray, sql } from 'drizzle-orm';
+import postgres from 'postgres';
 import { createApp } from '../src/app.js';
 import { connectDatabase } from '../src/db/client.js';
+import { migrate } from '../src/db/migrate.js';
 import * as t from '../src/db/schema.js';
 import { CollaborationService } from '../src/domain/service.js';
 import type { Credential } from '../src/config.js';
 
 if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
-const connection = connectDatabase(process.env.DATABASE_URL);
+const testSchema = `browser_${randomUUID().replaceAll('-', '')}`;
+const admin = postgres(process.env.DATABASE_URL, { max: 1, onnotice: () => {} });
+await admin.unsafe(`CREATE SCHEMA "${testSchema}"`);
+const connection = connectDatabase(process.env.DATABASE_URL, testSchema);
 const repo = `browser/${randomUUID()}`;
 const token = randomBytes(32).toString('hex');
 const actor = { member: 'browser-agent', role: 'agent' as const, repo };
@@ -27,6 +31,7 @@ const address = server.address();
 assert(address && typeof address !== 'string');
 let browser: Browser | undefined;
 try {
+  await migrate(process.env.DATABASE_URL, testSchema);
   browser = await chromium.launch({ headless: true, executablePath: process.env.PREFLIGHT_CHROMIUM_PATH });
   const { goal } = await service.execute(actor, 'preflight_register_goal', { request_id: randomUUID(), title: '修复登录超时', objective: '保持公共接口兼容', acceptance: ['相关测试通过'] }) as { goal: typeof t.goals.$inferSelect };
   const unsafeAgentType = '<svg onload=alert(1)> browser-test';
@@ -160,13 +165,6 @@ try {
 } finally {
   await browser?.close();
   await new Promise<void>(resolve => server.close(() => resolve()));
-  await connection.db.transaction(async db => {
-    const decisionIds = (await db.select({ id: t.decisions.id }).from(t.decisions).where(eq(t.decisions.repo, repo))).map(r => r.id);
-    const changeIds = (await db.select({ id: t.changes.id }).from(t.changes).where(eq(t.changes.repo, repo))).map(r => r.id);
-    await db.execute(sql`DELETE FROM decision_reviews WHERE repo = ${repo}`);
-    if (decisionIds.length) await db.delete(t.decisionImpacts).where(inArray(t.decisionImpacts.decision_id, decisionIds));
-    if (changeIds.length) await db.delete(t.changeSessions).where(inArray(t.changeSessions.change_id, changeIds));
-    for (const table of [t.findings, t.feedback, t.decisions, t.changes, t.sessions, t.goals, t.events, t.mutations]) await db.delete(table).where(eq(table.repo, repo));
-  });
   await connection.client.end();
+  await admin.unsafe(`DROP SCHEMA "${testSchema}" CASCADE`); await admin.end();
 }
