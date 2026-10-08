@@ -118,6 +118,7 @@ npm run build
 - [真实双 Agent 试验记录](docs/testing/real-agent-trial-2026-10-06.md)：实际发现、修复，以及从人工前置转为 Agent 协商的验证过程。
 - [阶段 A 验证记录](docs/testing/project-management-stage-a-2026-10-08.md)：本版实际测试、存量升级、测试夹具与尚未交付的边界。
 - [项目管理与自主协作改造方案 v0.2](docs/plans/autonomous-collaboration-v0.2.md)：阶段 A 已实现首版；阶段 B 的可靠推进、阶段 C 的事实验收与集成仍待开发。
+- [阶段 B 开发计划](docs/plans/reliable-agent-progression-stage-b.md)：客户端探针、可靠更新、续租/恢复、计划接续、协商超时及真实试用的实施顺序与验收门槛；尚未开发。
 - [原始设计文档](docs/archive/)：原四份 DevBoard AI 文档，保留作演进背景；其中的技术栈和阶段计划不代表当前实现。
 
 Preflight 当前不运行模型或后台调度 Agent；协商由外部 Agent 的实际工具调用驱动，更新后的结果在下次读取上下文时返回。
