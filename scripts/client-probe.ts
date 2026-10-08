@@ -1,0 +1,31 @@
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { CodexClient } from '../src/adapter/codex.js';
+const cwd = resolve('.preflight/client-probe'); await mkdir(cwd, { recursive: true });
+await writeFile(resolve(cwd, 'AGENTS.md'), 'This is an isolated capability probe. Do not create subagents, read outside this directory, or change files unless explicitly requested.\n');
+const nonce = randomUUID(); let client = new CodexClient();
+try {
+  await client.initialize();
+  const threadId = await client.start(cwd);
+  let turn = await client.completed(await client.begin(threadId, `Remember the marker ${nonce}. Reply only PROBE_READY. Do not use tools.`));
+  assert.equal(turn.status, 'completed'); console.log('✓ Real model turn completed');
+  await client.close(); client = new CodexClient(); await client.initialize(); await client.resume(threadId, cwd);
+  turn = await client.completed(await client.begin(threadId, 'Reply with only the marker from the preceding turn. Do not use tools.'));
+  assert.equal(turn.status, 'completed');
+  const read = await client.request('thread/read', { threadId, includeTurns: true });
+  assert(JSON.stringify(read).includes(nonce));
+  const last = (read.thread as { turns: { items: { type: string; text?: string }[] }[] }).turns.at(-1);
+  assert(last?.items.some(i => i.type === 'agentMessage' && i.text?.includes(nonce)), 'Actual resumed model must recall prior marker');
+  console.log('✓ New app-server process resumed the durable thread and model recalled prior context');
+  let observedCommand = false;
+  client.onNotification = (method, params) => { if (method === 'item/started' && (params.item as { type?: string })?.type === 'commandExecution') observedCommand = true; };
+  const turnId = await client.begin(threadId, 'Use a shell tool to run sleep 20, then reply PROBE_WAITED. Only execute that command.');
+  const deadline = Date.now() + 60000;
+  while (!observedCommand && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100));
+  assert(observedCommand, 'Observe a running command before testing interruption');
+  turn = await client.interrupt(threadId, turnId); assert.equal(turn.status, 'interrupted');
+  console.log('✓ Active turn interrupted with observed interrupted completion (not merely request acknowledgement)');
+  await writeFile(resolve(cwd, 'result.json'), JSON.stringify({ date: new Date().toISOString(), threadId, start: true, process_restart_resume: true, context_recall: true, turn_interrupt: true, injection: 'next_turn', cost: 'unavailable' }, null, 2), { mode: 0o600 });
+} finally { await client.close(); }

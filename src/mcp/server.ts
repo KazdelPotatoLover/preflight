@@ -4,6 +4,9 @@ import { ZodError } from 'zod';
 import { DomainError, schemas, type Actor } from '../domain/contracts.js';
 import type { CollaborationService } from '../domain/service.js';
 export const descriptions = {
+  preflight_manage_session: 'Open an empty agent session subscribed to a project before claiming work. Heartbeat every 30 seconds, expires after 120 seconds. Recover an expired or closed runtime with current version and new instance_id; epoch fences old instances. Close releases responsibility leases. State and stop are adapter reports.',
+  preflight_get_updates: 'Read pending project updates for your controlled session. Delivery repeats until explicitly acknowledged, including after restart. Do not infer completion from acknowledgement. Read project snapshot on initial subscription and recovery.',
+  preflight_ack_updates: 'Acknowledge owned deliveries after processing. waiting preserves a recorded pending obligation. stopped requires idle runtime after actual interruption; it remains an adapter report. Use runtime_id and runtime_epoch.',
   preflight_manage_project: 'Create or edit a repository project, including authorized planning agents. Human credentials only. All updates require current expected_version.',
   preflight_manage_milestone: 'Create or edit a project milestone, title, planned date and archive state. Requires project planning authority; does not assert delivery.',
   preflight_manage_goal: 'Edit goal planning, priority (1 highest), owner, milestone, date or definition with expected_version. Human or explicitly delegated planning agent only. Pause and cancel prevent execution; changing acceptance invalidates old task definitions.',
@@ -26,7 +29,7 @@ export async function handleMcp(request: Request, actor: Actor, service: Collabo
   for (const [name, description] of Object.entries(descriptions)) {
     const action = name as keyof typeof descriptions;
     server.registerTool(name, { description, inputSchema: schemas[action].shape,
-      annotations: { readOnlyHint: ['preflight_get_context', 'preflight_get_project', 'preflight_search_findings'].includes(action), destructiveHint: false, idempotentHint: true },
+      annotations: { readOnlyHint: ['preflight_get_context', 'preflight_get_project', 'preflight_search_findings', 'preflight_get_updates'].includes(action), destructiveHint: false, idempotentHint: true },
     }, async (args: Record<string, unknown>) => {
       try {
         const data = await service.execute(actor, action, args);

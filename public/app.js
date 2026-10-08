@@ -233,7 +233,7 @@ function renderGoals() {
                   !(c.waiting_for_coordination ?? c.waiting_for_decision)),
         );
         if (filter !== "all" && !work.length) return "";
-        return `<article class="goal-card"><div class="goal-head"><div class="section-heading"><h3>${escape(goal.title)}</h3>${badge(goal.progress)}</div><p class="small muted">优先级 ${goal.priority} · 业务责任人 ${escape(goal.owner ?? "未指定")} · ${escape(goal.due_date ?? "未设日期")}${goal.milestone_id ? ` · ${escape(project.milestones.find(m => m.id === goal.milestone_id)?.title ?? "里程碑")}` : ""}</p><div class="planning-actions"><button data-edit-goal="${goal.id}" class="secondary">编辑目标</button><button data-task-goal="${goal.id}" class="secondary">新增任务</button></div><p>${escape(goal.objective)}</p><ul class="criteria">${goal.acceptance.map((a) => `<li>${escape(a)}</li>`).join("")}</ul><span class="small muted">${escape(goal.id.slice(0, 8))} · ${all.length} 项工作 · 未覆盖 ${goal.uncovered_criteria?.length ?? 0} 项验收条件</span></div>${work.length ? work.map(workCard).join("") : '<div class="work muted small">等待 Agent 开始工作。通过 MCP 查询项目可获取目标 ID。</div>'}</article>`;
+        return `<article class="goal-card"><div class="goal-head"><div class="section-heading"><h3>${escape(goal.title)}</h3>${badge(goal.progress)}</div><p class="small muted">优先级 ${goal.priority} · 业务责任人 ${escape(goal.owner ?? "未指定")} · ${escape(goal.due_date ?? "未设日期")}${goal.milestone_id ? ` · ${escape(project.milestones.find(m => m.id === goal.milestone_id)?.title ?? "里程碑")}` : ""}</p><div class="planning-actions"><button data-edit-goal="${goal.id}" class="secondary">编辑目标</button><button data-task-goal="${goal.id}" class="secondary">新增任务</button></div><p>${escape(goal.objective)}</p>${goal.risks?.length ? `<p class="small blocked">风险：${[...new Set(goal.risks.map(r => riskLabel(r.code)))].map(escape).join("；")}</p>` : ""}<ul class="criteria">${goal.acceptance.map((a) => `<li>${escape(a)}</li>`).join("")}</ul><span class="small muted">${escape(goal.id.slice(0, 8))} · ${all.length} 项工作 · 未覆盖 ${goal.uncovered_criteria?.length ?? 0} 项验收条件</span></div>${work.length ? work.map(workCard).join("") : '<div class="work muted small">等待 Agent 开始工作。通过 MCP 查询项目可获取目标 ID。</div>'}</article>`;
       })
       .join("") ||
     '<div class="empty">这里还没有符合条件的工作。登记一个目标，或让 Agent 通过 MCP 开始协作。</div>';
@@ -261,10 +261,11 @@ function coordinationCard(decision) {
   const missing = decision.missing_change_ids ?? [];
   const required = decision.required_change_ids ?? decision.affected_change_ids ?? [];
   textNode(card, "p", `第 ${decision.review_round ?? 1}/${decision.round_limit ?? 3} 轮 · ${reviews.length}/${required.length} 项工作已答复`, "coordination-progress");
+  if (decision.round_deadline_at) textNode(card, "p", `本轮截止：${new Date(decision.round_deadline_at).toLocaleString("zh-CN")}`, "small muted");
   if (reviews.length) textNode(card, "p", `已答复：${reviews.map((r) => `${r.member}（${r.stance === "accept" ? "同意" : "异议"}）`).join("；")}`, "coordination-answered");
   if (missing.length) textNode(card, "p", `待答复：${missing.map(workLabel).join("；")}`, "coordination-missing");
   if (decision.status === "deferred")
-    textNode(card, "p", "已达到协商轮次上限。建议隔离受影响工作、保留分歧与证据，按各自边界继续推进。", "isolation-note");
+    textNode(card, "p", decision.deferred_reason === "unanswered_timeout" ? "本轮等待答复已超时。保留未答复项与证据，隔离争议范围后继续推进。" : "已达到协商轮次上限。建议隔离受影响工作、保留分歧与证据，按各自边界继续推进。", "isolation-note");
   if (decision.status === "needs_input")
     textNode(card, "p", "目标或变更边界存在信息缺口，请补充目标信息；普通技术分歧由 Agent 自行协商。", "input-note");
   if (["agent_resolved", "human_resolved"].includes(decision.status)) {
@@ -320,6 +321,7 @@ function renderCoordination() {
 }
 function render() {
   renderPlanning();
+  renderReliability();
   $("repo").textContent = `${project.repo} / ${project.actor.member}`;
   $("metrics").innerHTML = [
     ["团队目标", project.summary.goals],
@@ -482,7 +484,7 @@ function renderPlanning() {
   $("edit-project").disabled = !p;
   $("new-milestone").disabled = !p || p.state !== "active";
   $("project-description").textContent = p?.description ?? "按优先级查看团队计划；进度由 Agent 上报，尚未独立验证交付。";
-  $("milestones").innerHTML = project.milestones.map(m => `<article class="milestone"><strong>${escape(m.title)}</strong><span>${escape(m.due_date ?? "未设日期")} · ${m.reported_completed_goals}/${m.goal_count} 个目标已报告完成 · ${m.state === "archived" ? "已归档" : "待独立验收"}</span><button class="quiet" data-edit-milestone="${m.id}">编辑里程碑</button></article>`).join("");
+  $("milestones").innerHTML = project.milestones.map(m => `<article class="milestone"><strong>${escape(m.title)}</strong><span>${escape(m.due_date ?? "未设日期")} · ${m.reported_completed_goals}/${m.goal_count} 个目标已报告完成 · ${m.state === "archived" ? "已归档" : "待独立验收"}${m.risks?.length ? ` · ${m.risks.length} 项风险` : ""}</span><button class="quiet" data-edit-milestone="${m.id}">编辑里程碑</button></article>`).join("");
 }
 function renderTaskBoard() {
   $("goals").hidden = workView === "board"; $("task-board").hidden = workView !== "board";
@@ -570,3 +572,18 @@ $("manage-form").addEventListener("submit", async e => {
   catch (error) { message(error.message, true); }
   finally { button.disabled = false; }
 });
+
+function riskLabel(code) {
+  return ({ responsibility_expired: "执行责任已过期", executor_unresponsive: "执行器心跳中断，运行结果未知", coordination_pending: "协商尚未解决", execution_stop_unknown: "尚未收到停止反馈", replan_required: "需按新目标重新规划" })[code] ?? reasonLabel(code);
+}
+function renderReliability() {
+  const r = project.reliability;
+  $("runtime-summary").textContent = r ? `${r.pending_updates} 条更新待处理 · 最早未确认：${r.oldest_unacked_at ? new Date(r.oldest_unacked_at).toLocaleString("zh-CN") : "无"}。执行状态和停止反馈来自适配器上报。` : "暂未接入执行器";
+  $("runtimes").innerHTML = r?.runtimes.map(runtime => {
+    const member = project.sessions.find(s => s.id === runtime.session_id)?.member ?? runtime.session_id.slice(0,8);
+    const state = runtime.unresponsive ? "心跳中断，执行状态未知" : ({ waiting: "等待工作", running: "正在执行", stopped: "已停止", error: "运行异常", budget_exhausted: "已达到预算" })[runtime.state] ?? runtime.state;
+    return `<article class="milestone"><strong>${escape(member)} · ${escape(state)}</strong><span>${runtime.pending_updates} 条更新待处理 · 最近心跳 ${escape(new Date(runtime.heartbeat_at).toLocaleString("zh-CN"))}</span></article>`;
+  }).join("") || '<p class="small muted">暂无自动执行会话。手动 MCP 客户端仍可使用项目与任务功能。</p>';
+  const current = r?.stop_controls.filter(s => project.goals.some(g => g.id === s.aggregate_id && g.version === s.version) || project.projects.some(p => p.id === s.aggregate_id && p.version === s.version)) ?? [];
+  $("stop-controls").innerHTML = current.map(s => `<p class="small ${s.outcome === "stopped" ? "muted" : "blocked"}">计划停止 · ${escape(project.sessions.find(r => r.id === s.session_id)?.member ?? s.session_id.slice(0,8))}：${s.outcome === "stopped" ? "适配器报告已停止" : s.outcome === "superseded" ? "旧计划已被替代" : "执行停止尚未确认"}${s.observed_at ? ` · ${escape(new Date(s.observed_at).toLocaleString("zh-CN"))}` : ""}</p>`).join("");
+}

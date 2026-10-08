@@ -10,7 +10,13 @@ const connection = connectDatabase(process.env.DATABASE_URL);
 const port = Number(process.env.PREFLIGHT_PORT ?? 3000);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PREFLIGHT_PORT');
 const hostname = process.env.PREFLIGHT_HOST ?? '127.0.0.1';
-const app = createApp({ service: new CollaborationService(connection.db), credentials: () => loadCredentials(authFile),
+const service = new CollaborationService(connection.db);
+let maintaining = false;
+const worker = setInterval(() => {
+  if (maintaining) return; maintaining = true;
+  void service.maintain().catch(() => console.error('Preflight maintenance failed; will retry')).finally(() => { maintaining = false; });
+}, 5000).unref();
+const app = createApp({ service, credentials: () => loadCredentials(authFile),
   allowedHosts: (process.env.PREFLIGHT_ALLOWED_HOSTS ?? '127.0.0.1,localhost').split(',').map(h => h.trim()),
   secureCookies: process.env.PREFLIGHT_SECURE_COOKIES === 'true',
 });
@@ -18,7 +24,7 @@ const server = serve({ fetch: app.fetch, port, hostname }, () => console.log(`Pr
 let closing = false;
 async function shutdown() {
   if (closing) return;
-  closing = true;
+  closing = true; clearInterval(worker);
   const timer = setTimeout(() => process.exit(1), 10000).unref();
   await new Promise<void>(resolve => server.close(() => resolve()));
   await connection.client.end({ timeout: 5 });

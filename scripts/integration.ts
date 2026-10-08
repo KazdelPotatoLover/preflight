@@ -37,7 +37,7 @@ try {
   assert.equal(upgraded[0]?.review_round, 1);
   assert.equal(upgraded[0]?.review_epoch, 1);
   assert.equal((await connection.client`SELECT status FROM decisions WHERE id = ${legacyResolved}`)[0]?.status, 'human_resolved');
-  assert.equal((await connection.client`SELECT * FROM schema_migrations`).length, 3);
+  assert.equal((await connection.client`SELECT * FROM schema_migrations`).length, 4);
   assert.equal((await connection.client`SELECT * FROM domain_events WHERE action = 'decision.coordination_migrated'`).length, 1);
   console.log('✓ Real legacy schema upgrades pending decisions once and preserves historical human resolutions');
 } catch (error) {
@@ -356,6 +356,9 @@ try {
     const testRepos = [repo, `${repo}-other`];
     const decisionIds = (await db.select({ id: t.decisions.id }).from(t.decisions).where(inArray(t.decisions.repo, testRepos))).map(r => r.id);
     const changeIds = (await db.select({ id: t.changes.id }).from(t.changes).where(inArray(t.changes.repo, testRepos))).map(r => r.id);
+    await db.delete(t.deliveries).where(inArray(t.deliveries.repo, testRepos));
+    await db.delete(t.coordinationEvents).where(inArray(t.coordinationEvents.repo, testRepos));
+    await db.delete(t.runtimes).where(inArray(t.runtimes.repo, testRepos));
     await db.delete(t.decisionReviews).where(inArray(t.decisionReviews.repo, testRepos));
     if (decisionIds.length) await db.delete(t.decisionImpacts).where(inArray(t.decisionImpacts.decision_id, decisionIds));
     if (changeIds.length) await db.delete(t.changeSessions).where(inArray(t.changeSessions.change_id, changeIds));

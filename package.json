@@ -19,7 +19,13 @@
     "test:integration": "node --env-file=.env --import tsx scripts/integration.ts",
     "test:management": "node --env-file=.env --import tsx scripts/management-integration.ts",
     "test:management-ui": "node --env-file=.env --import tsx scripts/management-browser.ts",
-    "test:ui": "node --env-file=.env --import tsx scripts/browser.ts"
+    "test:ui": "node --env-file=.env --import tsx scripts/browser.ts",
+    "test:client": "node --import tsx scripts/client-probe.ts",
+    "agent:start": "node --env-file=.env --import tsx scripts/agent-runtime.ts",
+    "test:reliability": "node --env-file=.env --import tsx scripts/reliability-integration.ts",
+    "test:agents": "node --env-file=.env --import tsx scripts/agent-trial.ts",
+    "test:runtime-faults": "node --env-file=.env --import tsx scripts/runtime-faults.ts",
+    "test:runtime-real": "node --env-file=.env --import tsx scripts/runtime-control-real.ts"
   },
   "dependencies": {
     "@hono/node-server": "2.1.3",

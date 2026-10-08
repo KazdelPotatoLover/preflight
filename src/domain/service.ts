@@ -5,6 +5,7 @@ import type { Database, QueryDatabase } from '../db/client.js';
 import * as t from '../db/schema.js';
 import { canonical, DomainError, redact, schemas, type Action, type Actor } from './contracts.js';
 import { relatedWork } from './related.js';
+import { Reliability, publish } from './reliability.js';
 import { Management } from './management.js';
 const now = () => new Date().toISOString();
 const openDecisionStatuses = ['negotiating', 'deferred', 'needs_input'];
@@ -45,11 +46,12 @@ export class CollaborationService {
     });
   }
   private async record(db: QueryDatabase, actor: Actor, action: string, aggregateId: string, data: Record<string, unknown>) {
-    await db.insert(t.events).values({ id: randomUUID(), repo: actor.repo, actor: actor.member, action, aggregate_id: aggregateId, data });
+    await publish(db, actor, action, aggregateId, data, this.clock);
   }
   async execute(actor: Actor, action: Action, raw: unknown): Promise<unknown> {
     const parsed = schemas[action].parse(raw);
     if (action === 'preflight_get_project') return this.project(actor, schemas.preflight_get_project.parse(parsed).project_id);
+    if (action === 'preflight_get_updates') return this.db.transaction(db => new Reliability(db, actor, this.clock).updates(parsed), { isolationLevel: 'repeatable read', accessMode: 'read only' });
     if (action === 'preflight_search_findings') return this.db.transaction(db => new Management(db, actor, this.clock).search(parsed), { isolationLevel: 'repeatable read', accessMode: 'read only' });
     if (action === 'preflight_get_context') {
       const input = schemas.preflight_get_context.parse(parsed);
@@ -63,11 +65,15 @@ export class CollaborationService {
       return this.context(actor, input.change_id!, input.session_id!);
     }
     const requestId = (parsed as { request_id: string }).request_id;
-    const hash = createHash('sha256').update(canonical(parsed)).digest('hex');
+    const businessInput = Object.fromEntries(Object.entries(parsed).filter(([key]) => !['runtime_id','runtime_epoch'].includes(key)));
+    const hash = createHash('sha256').update(canonical(businessInput)).digest('hex');
     const actorKey = `${actor.role}:${actor.member}`;
     return this.db.transaction(async db => {
       // One consistent repository lock keeps retries, decisions and completions atomic in this small MVP.
       await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${actor.repo}, 0))`);
+      const reliability = new Reliability(db, actor, this.clock);
+      if (action !== 'preflight_manage_session' || !['open','recover'].includes((parsed as { operation: string }).operation)) await reliability.guard(parsed, action === 'preflight_manage_session' && (parsed as { operation: string }).operation === 'close');
+      await reliability.maintain();
       const [existing] = await db.select().from(t.mutations).where(and(eq(t.mutations.repo, actor.repo), eq(t.mutations.actor, actorKey), eq(t.mutations.action, action), eq(t.mutations.request_id, requestId)));
       if (existing) {
         if (existing.request_hash !== hash) throw new DomainError('IDEMPOTENCY_CONFLICT', 'Request ID was already used with different input', 409);
@@ -80,6 +86,8 @@ export class CollaborationService {
   }
   private async perform(db: QueryDatabase, actor: Actor, action: Action, input: unknown): Promise<Record<string, unknown>> {
     const management = new Management(db, actor, this.clock);
+    if (action === 'preflight_manage_session') return new Reliability(db, actor, this.clock).manage(input);
+    if (action === 'preflight_ack_updates') return new Reliability(db, actor, this.clock).ack(input);
     if (['preflight_manage_project', 'preflight_manage_milestone', 'preflight_manage_goal', 'preflight_manage_work', 'preflight_manage_claim'].includes(action)) return management.execute(action, input);
     switch (action) {
       case 'preflight_register_goal': {
@@ -188,7 +196,7 @@ export class CollaborationService {
           verification: data.verification ? { ...data.verification, source: 'agent_report' as const } : null,
           pr_url: data.pr_url ?? change.pr_url, version: change.version + 1, updated_at: now(),
         }).where(eq(t.changes.id, change.id)).returning();
-        if (change.lifecycle === 'managed' && ['completed', 'abandoned'].includes(data.status)) await db.update(t.claims).set({ released_at: this.clock().toISOString() }).where(and(eq(t.claims.change_id, change.id), isNull(t.claims.released_at)));
+        if (change.lifecycle === 'managed' && ['completed', 'abandoned'].includes(data.status)) await db.update(t.claims).set({ released_at: this.clock().toISOString(), release_reason: data.status }).where(and(eq(t.claims.change_id, change.id), isNull(t.claims.released_at)));
         await db.update(t.sessions).set({ last_seen_at: now() }).where(eq(t.sessions.id, data.session_id));
         await this.record(db, actor, 'change.updated', change.id, { status: data.status, source: 'agent_report', version: change.version + 1 });
         return { change: updated, status_source: 'agent_report' };
@@ -225,6 +233,7 @@ export class CollaborationService {
           [decision] = await db.insert(t.decisions).values({ id: randomUUID(), repo: actor.repo,
             question: data.question, context: data.context, category: data.category, urgency: data.urgency,
             authority: data.authority, status: data.authority === 'within_goal' ? 'negotiating' : 'needs_input',
+            round_deadline_at: data.authority === 'within_goal' ? new Date(this.clock().getTime()+600000).toISOString() : null,
             options: data.options.map(o => ({ id: randomUUID(), ...o })), recommendation: data.recommendation, raised_by: actor.member }).returning();
         } else {
           const impacts = await db.select().from(t.decisionImpacts).where(eq(t.decisionImpacts.decision_id, decision.id));
@@ -233,7 +242,7 @@ export class CollaborationService {
           if (newImpact || escalating) [decision] = await db.update(t.decisions).set({
             urgency: escalating ? 'blocking' : decision.urgency, version: decision.version + 1,
             ...(newImpact ? { review_epoch: decision.review_epoch + 1, review_round: 1,
-              status: decision.authority === 'within_goal' ? 'negotiating' : 'needs_input' } : {}),
+              status: decision.authority === 'within_goal' ? 'negotiating' : 'needs_input', deferred_reason: null, round_deadline_at: decision.authority === 'within_goal' ? decision.round_deadline_at ?? new Date(this.clock().getTime()+600000).toISOString() : null } : {}),
           }).where(eq(t.decisions.id, decision.id)).returning();
           if (newImpact && decision) await this.record(db, actor, 'decision.review_scope_changed', decision.id,
             { affected_change_ids: affected, review_epoch: decision.review_epoch, review_round: decision.review_round, version: decision.version });
@@ -247,7 +256,8 @@ export class CollaborationService {
       case 'preflight_review_decision': {
         if (actor.role !== 'agent') throw new DomainError('FORBIDDEN', 'Only agents may review coordination decisions', 403);
         const data = schemas.preflight_review_decision.parse(input);
-        await this.participant(db, actor, data.change_id, data.session_id);
+        const reviewing = await this.participant(db, actor, data.change_id, data.session_id);
+        if (reviewing.lifecycle === 'managed') await management.requireLease(reviewing, data.session_id, data.lease_id, data.lease_epoch);
         const [decision] = await db.select().from(t.decisions).where(and(eq(t.decisions.id, data.decision_id), eq(t.decisions.repo, actor.repo)));
         if (!decision) throw new DomainError('DECISION_NOT_FOUND', 'Decision was not found', 404);
         const impacts = await db.select({ change_id: t.decisionImpacts.change_id }).from(t.decisionImpacts)
@@ -268,8 +278,8 @@ export class CollaborationService {
         const agreed = allAnswered && all.every(r => r.stance === 'accept' && r.option_id === all[0]!.option_id);
         const nextRound = allAnswered && !agreed && decision.review_round < 3;
         const [updated] = await db.update(t.decisions).set({ version: decision.version + 1,
-          ...(agreed ? { status: 'agent_resolved', option_id: all[0]!.option_id, resolution: 'All affected changes accepted the same option with evidence', resolved_by: 'agent_consensus', resolved_at: now() }
-            : nextRound ? { review_round: decision.review_round + 1 } : allAnswered ? { status: 'deferred' } : {}),
+          ...(agreed ? { status: 'agent_resolved', option_id: all[0]!.option_id, resolution: 'All affected changes accepted the same option with evidence', resolved_by: 'agent_consensus', resolved_at: now(), round_deadline_at: null, deferred_reason: null }
+            : nextRound ? { review_round: decision.review_round + 1, round_deadline_at: new Date(this.clock().getTime()+600000).toISOString() } : allAnswered ? { status: 'deferred', deferred_reason: 'disagreement_limit', round_deadline_at: null } : {}),
         }).where(eq(t.decisions.id, decision.id)).returning();
         if (!updated) throw new Error('Missing updated decision');
         await this.record(db, actor, 'decision.reviewed', decision.id, { change_id: data.change_id, session_id: data.session_id,
@@ -298,6 +308,13 @@ export class CollaborationService {
       }
       default: throw new DomainError('VALIDATION_ERROR', 'Unsupported mutation');
     }
+  }
+  async maintain() {
+    const repos = await this.db.selectDistinct({ repo: t.projects.repo }).from(t.projects);
+    for (const { repo } of repos) await this.db.transaction(async db => {
+      await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${repo}, 0))`);
+      await new Reliability(db, { repo, member: 'preflight-worker', role: 'agent' }, this.clock).maintain();
+    });
   }
   async context(actor: Actor, changeId: string, sessionId: string) {
     return this.db.transaction(async db => {
@@ -355,11 +372,24 @@ export class CollaborationService {
           const covered = new Set(children.filter(c => c.status !== 'abandoned' && c.goal_definition_version === g.definition_version).flatMap(c => c.lifecycle === 'managed' ? c.goal_criteria_indices : g.acceptance.map((_, i) => i)));
           return { ...g, uncovered_criteria: g.acceptance.map((_,i) => i).filter(i => !covered.has(i)), completed_tasks: children.filter(c => c.status === 'completed').length, task_count: children.length, progress: g.plan_state !== 'ready' ? g.plan_state : !children.length ? 'planned' : children.every(c => c.status === 'completed' && !c.blocked_reasons.length) && covered.size === g.acceptance.length ? 'reported_completed' : children.some(c => c.waiting_for_coordination) ? 'coordinating' : 'active' };
         });
-      return { projects, selected_project_id: projectId ?? null, milestones: milestones.filter(m => !projectId || m.project_id === projectId).map(m => {
-          const items = goalViews.filter(g => g.milestone_id === m.id);
-          return { ...m, goal_count: items.length, reported_completed_goals: items.filter(g => g.progress === 'reported_completed').length, delivery_state: 'not_independently_verified' };
+      const runtimeRows = await db.select().from(t.runtimes).where(and(eq(t.runtimes.repo, actor.repo), projectId ? eq(t.runtimes.project_id, projectId) : undefined));
+      const pendingStats = await db.select({ session_id: t.deliveries.session_id, count: sql<number>`count(*)::int`, oldest: sql<string | null>`min(${t.deliveries.created_at})::text` }).from(t.deliveries).innerJoin(t.coordinationEvents, eq(t.coordinationEvents.id, t.deliveries.event_id)).where(and(eq(t.deliveries.repo, actor.repo), isNull(t.deliveries.acked_at), projectId ? eq(t.coordinationEvents.project_id, projectId) : undefined)).groupBy(t.deliveries.session_id);
+      const controls = await db.select({ delivery: t.deliveries, event: t.coordinationEvents }).from(t.deliveries).innerJoin(t.coordinationEvents, eq(t.coordinationEvents.id, t.deliveries.event_id)).leftJoin(t.goals, eq(t.goals.id, t.coordinationEvents.aggregate_id)).leftJoin(t.projects, eq(t.projects.id, t.coordinationEvents.aggregate_id)).where(and(eq(t.deliveries.repo, actor.repo), projectId ? eq(t.coordinationEvents.project_id, projectId) : undefined, sql`((${t.coordinationEvents.action}='goal.updated' AND ${t.coordinationEvents.entity_version}=${t.goals.version} AND ${t.goals.plan_state} IN ('paused','cancelled','archived')) OR (${t.coordinationEvents.action}='project.updated' AND ${t.coordinationEvents.entity_version}=${t.projects.version} AND ${t.projects.state}='archived'))`)).orderBy(desc(t.deliveries.created_at),t.deliveries.id).limit(201);
+      const runtimeViews = runtimeRows.map(r => ({ ...r, unresponsive: ['waiting','running'].includes(r.state) && Date.parse(r.expires_at) <= this.clock().getTime(), source: 'adapter_report', pending_updates: pendingStats.find(u => u.session_id === r.session_id)?.count ?? 0 }));
+      const stopControls = controls.slice(0,200).map(r => ({ session_id: r.delivery.session_id, aggregate_id: r.event.aggregate_id, version: r.event.entity_version, requested_at: r.event.created_at, observed_at: r.delivery.acked_at, outcome: r.delivery.outcome, source: 'adapter_report' }));
+      const risks = work.flatMap(c => [
+        ...c.blocked_reasons.map(code => ({ code, goal_id: c.goal_id, change_id: c.id, observed_at: c.updated_at, source: 'project_state' })),
+        ...(c.claim_state === 'expired' ? [{ code: 'responsibility_expired', goal_id: c.goal_id, change_id: c.id, observed_at: c.updated_at, source: 'lease_record' }] : []),
+        ...(runtimeViews.some(r => r.session_id === c.claim?.session_id && r.unresponsive) ? [{ code: 'executor_unresponsive', goal_id: c.goal_id, change_id: c.id, observed_at: runtimeViews.find(r => r.session_id === c.claim?.session_id)!.heartbeat_at, source: 'runtime_heartbeat' }] : []),
+        ...(views.some(d => d.required_change_ids.includes(c.id) && ['deferred','needs_input'].includes(d.status)) ? [{ code: 'coordination_pending', goal_id: c.goal_id, change_id: c.id, observed_at: c.updated_at, source: 'decision_record' }] : []),
+      ]);
+      const riskGoals = goalViews.map(g => ({ ...g, risks: [...risks.filter(r => r.goal_id === g.id), ...stopControls.filter(s => s.aggregate_id === g.id && s.version === g.version && s.outcome !== 'stopped' && s.outcome !== 'superseded').map(s => ({ code: 'execution_stop_unknown', goal_id: g.id, change_id: null, observed_at: s.requested_at, source: 'unacked_plan_control' }))] }));
+      const reliability = { risks, runtimes: runtimeViews, pending_updates: pendingStats.reduce((count,s) => count+s.count,0), oldest_unacked_at: pendingStats.flatMap(s => s.oldest ? [s.oldest] : []).sort()[0] ?? null, stop_controls: stopControls, stop_controls_truncated: controls.length>200 };
+      return { reliability, projects, selected_project_id: projectId ?? null, milestones: milestones.filter(m => !projectId || m.project_id === projectId).map(m => {
+          const items = riskGoals.filter(g => g.milestone_id === m.id);
+          return { ...m, risks: items.flatMap(g => g.risks), goal_count: items.length, reported_completed_goals: items.filter(g => g.progress === 'reported_completed').length, delivery_state: 'not_independently_verified' };
         }), repo: actor.repo, actor: { member: actor.member, role: actor.role },
-        goals: goalViews, changes: work, sessions, decisions: views, events,
+        goals: riskGoals, changes: work, sessions, decisions: views, events,
         available_work: work.filter(c => c.available_to_claim).sort((a,b) => goals.findIndex(g => g.id === a.goal_id) - goals.findIndex(g => g.id === b.goal_id)),
         summary: { goals: goals.length, active_changes: changes.filter(c => !['completed', 'abandoned'].includes(c.status)).length,
           pending_decisions: views.filter(d => openDecisionStatuses.includes(d.status)).length,

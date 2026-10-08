@@ -41,7 +41,7 @@ export const dependencies = pgTable('change_dependencies', {
 export const claims = pgTable('work_claims', {
   ...identity(), change_id: uuid('change_id').notNull().references(() => changes.id), session_id: uuid('session_id').notNull().references(() => sessions.id),
   member: text('member').notNull(), epoch: integer('epoch').notNull(),
-  expires_at: timestamp('expires_at', { withTimezone: true, mode: 'string' }).notNull(), released_at: timestamp('released_at', { withTimezone: true, mode: 'string' }),
+  expires_at: timestamp('expires_at', { withTimezone: true, mode: 'string' }).notNull(), released_at: timestamp('released_at', { withTimezone: true, mode: 'string' }), release_reason: text('release_reason'),
 });
 export const changeSessions = pgTable('change_sessions', {
   change_id: uuid('change_id').notNull().references(() => changes.id), session_id: uuid('session_id').notNull().references(() => sessions.id),
@@ -58,7 +58,7 @@ export const decisions = pgTable('decisions', {
   ...identity(), question: text('question').notNull(), context: text('context').notNull(), category: text('category').notNull(),
   urgency: text('urgency').notNull(), status: text('status').notNull().default('negotiating'),
   authority: text('authority').notNull().default('within_goal'), review_round: integer('review_round').notNull().default(1),
-  review_epoch: integer('review_epoch').notNull().default(1),
+  review_epoch: integer('review_epoch').notNull().default(1), round_deadline_at: timestamp('round_deadline_at', { withTimezone: true, mode: 'string' }), deferred_reason: text('deferred_reason'),
   options: jsonb('options').$type<DecisionOption[]>().notNull(), recommendation: text('recommendation'),
   raised_by: text('raised_by').notNull(), option_id: uuid('option_id'), resolution: text('resolution'), resolved_by: text('resolved_by'),
   resolved_at: timestamp('resolved_at', { withTimezone: true, mode: 'string' }), version: integer('version').notNull().default(1),
@@ -85,3 +85,18 @@ export const mutations = pgTable('mutation_requests', {
   request_id: uuid('request_id').notNull(), request_hash: text('request_hash').notNull(), response: jsonb('response').notNull(),
 }, t => [uniqueIndex('mutations_key_idx').on(t.repo, t.actor, t.action, t.request_id)]);
 export type Change = typeof changes.$inferSelect;
+export const runtimes = pgTable('session_runtimes', {
+  session_id: uuid('session_id').primaryKey().references(() => sessions.id), repo: text('repo').notNull(), project_id: uuid('project_id').notNull().references(() => projects.id),
+  instance_id: uuid('instance_id').notNull(), epoch: integer('epoch').notNull(), version: integer('version').notNull(), state: text('state').notNull(),
+  heartbeat_at: timestamp('heartbeat_at', { withTimezone: true, mode: 'string' }).notNull(), expires_at: timestamp('expires_at', { withTimezone: true, mode: 'string' }).notNull(),
+  missing_notified: boolean('missing_notified').notNull().default(false), capabilities: jsonb('capabilities').$type<Record<string, boolean>>().notNull(),
+});
+export const coordinationEvents = pgTable('coordination_events', {
+  id: uuid('id').primaryKey().references(() => events.id), repo: text('repo').notNull(), project_id: uuid('project_id').notNull().references(() => projects.id),
+  action: text('action').notNull(), aggregate_id: uuid('aggregate_id').notNull(), entity_version: integer('entity_version'), payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+  created_at: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull(), priority: integer('priority').notNull(),
+});
+export const deliveries = pgTable('event_deliveries', {
+  id: uuid('id').primaryKey(), repo: text('repo').notNull(), event_id: uuid('event_id').notNull().references(() => coordinationEvents.id), session_id: uuid('session_id').notNull().references(() => sessions.id),
+  created_at: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull(), acked_at: timestamp('acked_at', { withTimezone: true, mode: 'string' }), outcome: text('outcome'), observed_version: integer('observed_version'),
+});

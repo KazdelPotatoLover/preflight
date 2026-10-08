@@ -1,3 +1,4 @@
+import { publish } from './reliability.js';
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import * as t from '../db/schema.js';
@@ -9,7 +10,7 @@ export class Management {
   constructor(private db: QueryDatabase, private actor: Actor, private clock: () => Date) {}
   private time() { return this.clock().toISOString(); }
   async event(action: string, aggregate_id: string, data: Record<string, unknown>) {
-    await this.db.insert(t.events).values({ id: randomUUID(), repo: this.actor.repo, actor: this.actor.member, action, aggregate_id, data });
+    await publish(this.db, this.actor, action, aggregate_id, data, this.clock);
   }
   async project(id: string) {
     const [p] = await this.db.select().from(t.projects).where(and(eq(t.projects.id, id), eq(t.projects.repo, this.actor.repo)));
@@ -99,16 +100,30 @@ export class Management {
     if (c.goal_definition_version !== g.definition_version) throw new DomainError('REPLAN_REQUIRED', 'Task must be updated against the current goal definition', 409);
     const deps = await this.db.select({ work: t.changes, goal_definition_version: t.goals.definition_version }).from(t.dependencies).innerJoin(t.changes, eq(t.changes.id, t.dependencies.depends_on_id)).innerJoin(t.goals, eq(t.goals.id, t.changes.goal_id)).where(eq(t.dependencies.change_id, c.id));
     if (deps.some(d => d.work.status !== 'completed' || d.work.goal_definition_version !== d.goal_definition_version)) throw new DomainError('DEPENDENCY_PENDING', 'Dependencies must report completion against the current goal definition before this task can be claimed', 409);
+    const [runtime] = await this.db.select().from(t.runtimes).where(eq(t.runtimes.session_id, sessionId));
+    if (runtime) {
+      const active = await this.db.select({ claim: t.claims }).from(t.claims).innerJoin(t.changes, eq(t.changes.id, t.claims.change_id)).innerJoin(t.goals, eq(t.goals.id, t.changes.goal_id)).where(and(eq(t.claims.repo, this.actor.repo), isNull(t.claims.released_at), eq(t.goals.project_id, g.project_id)));
+      const current = active.filter(r => Date.parse(r.claim.expires_at) > this.clock().getTime());
+      if (current.some(r => r.claim.session_id === sessionId)) throw new DomainError('SESSION_CAPACITY', 'Session may own one primary task at a time', 409);
+      if (current.length >= 2) throw new DomainError('PROJECT_CAPACITY', 'Project currently permits two primary tasks', 409);
+    }
     const old = await this.currentClaim(c.id);
     if (old && Date.parse(old.expires_at) > this.clock().getTime()) throw new DomainError('ALREADY_CLAIMED', 'Task already has a current responsibility lease', 409);
     if (old) {
-      await this.db.update(t.claims).set({ released_at: this.time() }).where(eq(t.claims.id, old.id));
+      await this.db.update(t.claims).set({ released_at: this.time(), release_reason: 'expired' }).where(eq(t.claims.id, old.id));
       await this.event('claim.expired', c.id, { lease_id: old.id, epoch: old.epoch });
     }
     const [lease] = await this.db.insert(t.claims).values({ id: randomUUID(), repo: this.actor.repo, change_id: c.id, session_id: sessionId, member: this.actor.member,
       epoch: c.claim_epoch + 1, expires_at: new Date(this.clock().getTime() + 600000).toISOString() }).returning();
     const [change] = await this.db.update(t.changes).set({ claim_epoch: c.claim_epoch + 1, version: c.version + 1, updated_at: this.time() }).where(eq(t.changes.id, c.id)).returning();
     await this.db.insert(t.changeSessions).values({ change_id: c.id, session_id: sessionId }).onConflictDoNothing();
+    if (c.claim_epoch > 0) {
+      const affected = await this.db.select({ decision: t.decisions }).from(t.decisionImpacts).innerJoin(t.decisions, eq(t.decisions.id, t.decisionImpacts.decision_id)).where(and(eq(t.decisionImpacts.change_id, c.id), eq(t.decisions.repo, this.actor.repo), eq(t.decisions.status, 'negotiating')));
+      for (const { decision: d } of affected) {
+        await this.db.update(t.decisions).set({ review_epoch: d.review_epoch+1, version: d.version+1 }).where(eq(t.decisions.id, d.id));
+        await this.event('decision.owner_changed', d.id, { review_epoch: d.review_epoch+1, version: d.version+1 });
+      }
+    }
     await this.event('claim.created', c.id, { lease_id: lease!.id, epoch: lease!.epoch, session_id: sessionId });
     return { change: change!, claim: lease!, session_id: sessionId };
   }
@@ -182,7 +197,7 @@ export class Management {
           await this.db.update(t.sessions).set({ last_seen_at: this.time() }).where(eq(t.sessions.id, lease.session_id));
           await this.event('claim.renewed', c.id, { lease_id: lease.id, epoch: lease.epoch }); return { claim, change: c };
         }
-        await this.db.update(t.claims).set({ released_at: this.time() }).where(eq(t.claims.id, lease.id));
+        await this.db.update(t.claims).set({ released_at: this.time(), release_reason: 'released' }).where(eq(t.claims.id, lease.id));
         const [change] = await this.db.update(t.changes).set({ version: c.version + 1, updated_at: this.time() }).where(eq(t.changes.id, c.id)).returning();
         await this.event('claim.released', c.id, { lease_id: lease.id, epoch: lease.epoch }); return { change };
       }
@@ -207,7 +222,7 @@ export class Management {
         ...dependencies.filter(d => d.status !== 'completed' || !d.definition_current).map(d => `dependency:${d.change_id}`),
       ];
       return { ...c, project_id: g.goal.project_id, dependencies, blocked_reasons,
-        claim: active ? lease : null, claim_state: closed(c.status) ? 'closed' : c.lifecycle === 'legacy' ? 'legacy' : active ? 'claimed' : lease && !lease.released_at ? 'expired' : 'unclaimed',
+        claim: active ? lease : null, claim_state: closed(c.status) ? 'closed' : c.lifecycle === 'legacy' ? 'legacy' : active ? 'claimed' : lease && (!lease.released_at || lease.release_reason === 'expired') ? 'expired' : 'unclaimed',
         available_to_claim: c.lifecycle === 'managed' && !closed(c.status) && !active && !blocked_reasons.length };
     });
   }

@@ -1,9 +1,9 @@
 # Preflight 开发说明
 
-> 当前实现：0.1.0 团队 MCP MVP + v0.2 阶段 A 首版。更新日期：2026-10-08。
+> 当前实现：0.1.0 团队 MCP MVP + v0.2 阶段 A 与阶段 B 首版。更新日期：2026-10-08。
 > 产品范围见[产品说明](product-spec.md)，安装命令见[README](../README.md)。
 
-本文描述仓库当前实现。pnpm workspace、Next.js、Redis、Observer、SSE、Embedding 和 Policy 仍是演进候选。当前新增项目/里程碑、业务计划、独立子任务验收、依赖、主责任租约与历史检索，新增协议见第 13 节。
+本文描述仓库当前实现。pnpm workspace、Next.js、Redis、Observer、SSE、Embedding 和 Policy 仍是演进候选。当前新增项目/里程碑、业务计划、独立子任务验收、依赖、主责任租约与历史检索，项目管理协议见第 13 节，可靠推进见第 14 节。
 
 ## 1. 架构与目录
 
@@ -14,7 +14,7 @@ src/
   index.ts                  # 启动、配置、关闭
   app.ts                    # Hono、认证、同源与输入大小限制、静态资源
   config.ts                 # 凭据格式、令牌哈希认证、过期检查
-  mcp/server.ts             # 十四个工具、SDK transport、结果与错误映射
+  mcp/server.ts             # 十七个工具、SDK transport、结果与错误映射
   domain/
     contracts.ts            # Zod 契约、脱敏、稳定请求序列化
     service.ts              # 共享领域规则、事务、上下文与看板快照
@@ -61,7 +61,7 @@ REST 和 MCP 调用同一个 `CollaborationService`，不能在 transport 层重
 
 ## 3. 传输与工具契约
 
-`POST /mcp` 是无状态 Streamable HTTP endpoint。每个请求建立 SDK server/transport，业务 Session 存入 PostgreSQL，不使用 MCP 传输会话存业务数据。响应使用 JSON；不提供 SSE/GET 流，GET、DELETE 返回 405。客户端可发现十四个工具。
+`POST /mcp` 是无状态 Streamable HTTP endpoint。每个请求建立 SDK server/transport，业务 Session 存入 PostgreSQL，不使用 MCP 传输会话存业务数据。响应使用 JSON；不提供 SSE/GET 流，GET、DELETE 返回 405。客户端可发现十七个工具。
 
 输入以 `src/domain/contracts.ts` 为准。字段长度、数组数量、UUID、URL 和枚举由 Zod 校验，顶层拒绝未知字段。所有写工具必须传 `request_id` UUID。
 
@@ -99,7 +99,7 @@ MCP 成功响应同时带文本内容和 `structuredContent`：
 2. `preflight_start_work` 带该 Goal，保存 `session_id`、`change.id`、`change.version`。默认创建独立工作；只有确实要共同参与同一工作时才传 `existing_change_id`。
 3. 调用 `preflight_get_context`，检查相关工作、Findings、协商事项与已达成结果和 `recommended_action`。
 4. 报告 `implementing`，发布有用 Findings；重要进展后更新状态并再次读取上下文。
-5. 共同取舍调用 `preflight_propose_decision`，每项受影响工作通过 `preflight_review_decision` 提交意见与目标/约束/验证证据。读取其他工作意见后进行下一轮或取得一致；结果进入共享上下文。三轮仍分歧则隔离争议范围，完成时提交隔离证据。只有真正目标信息/边界缺口才需要用户补充。没有服务器推送或自动唤醒。
+5. 共同取舍调用 `preflight_propose_decision`，每项受影响工作通过 `preflight_review_decision` 提交意见与目标/约束/验证证据。读取其他工作意见后进行下一轮或取得一致；结果进入共享上下文。三轮仍分歧则隔离争议范围，完成时提交隔离证据。只有真正目标信息/边界缺口才需要用户补充。普通 MCP 调用本身不唤醒模型；可选适配器通过可靠更新触发下一轮。
 6. 报告 `verifying`，本地自行执行验证；用最新版本报告 `completed`，提交当前 SHA 和完整验收证据。
 
 目标示例，所有 UUID 示例需要由客户端实际生成：
@@ -199,7 +199,7 @@ Context 在 repeatable-read 只读事务中读取：当前 Goal/Change、相关�
 | `GET /api/v1/findings?scope=repo` | 当前仓库最近 Findings |
 | `GET /api/v1/findings?scope=change&change_id=...` | 当前仓库指定 Change 的 Findings |
 | `GET /api/v1/context?change_id=...&session_id=...` | 工作上下文 |
-| `POST /api/v1/tools/:action` | 与十四个 MCP 工具共享输入/规则 |
+| `POST /api/v1/tools/:action` | 与十七个 MCP 工具共享输入/规则 |
 | `POST /api/v1/decisions/:id/resolve` | 仅 human，可补充 needs_input；拒绝普通协商 |
 
 Findings 查询必须显式选择 `scope=repo` 或 `scope=change`，后者要求 UUID `change_id`；拒绝未知/重复参数，不接受客户端自选仓库。返回 Findings 含 Change 标题、Session、成员、Agent 类型和置信度，按时间及 UUID 从新到旧，最多 100 条；`truncated` 标记是否有更多。已完成/放弃工作仍可读取 Findings，当前没有分页。工作台使用该独立接口切换范围，未选择时不加载。
@@ -258,7 +258,7 @@ Decision 视图附 `review_round`、`review_epoch`、`round_limit=3`、`current_
 
 ## 12. 演进顺序与原文
 
-按[v0.2 方案](plans/autonomous-collaboration-v0.2.md)推进。阶段 A 首版已实现，实际协议见第 13 节；B/C 的客户端可靠推进和事实验收尚未开发。管理 MCP 与工作台共享领域规则。
+按[v0.2 方案](plans/autonomous-collaboration-v0.2.md)推进。阶段 A 首版已实现，实际协议见第 13 节；阶段 B 首版已实现（第 14 节）；阶段 C 的事实验收尚未开发。管理 MCP 与工作台共享领域规则。
 
 后续结合真实项目试用继续扩展：
 
@@ -301,7 +301,7 @@ Decision 视图附 `review_round`、`review_epoch`、`round_limit=3`、`current_
 2. 优先认领适当的已有任务：`preflight_manage_claim {operation:"claim",change_id,expected_version,request_id}`，保存返回的 `session_id`、`change.version` 及 `claim.id/epoch/expires_at`。
 3. 尚无适当任务时调用 `preflight_start_work`，传 `mode:"propose"`（仅提出）或 `mode:"claim"`（提出并认领）、独立 `task_acceptance[]`、`goal_criteria_indices[]` 和可选 `depends_on_change_ids[]`。保留原必填字段 `goal_id,title,agent_type,request_id`。新项目不接受无 mode 的新工作。
 4. 读取上下文，执行并发布发现；持有人按当前版本上报阶段，必须额外传 `lease_id:claim.id,lease_epoch:claim.epoch`。同伴可以通过原 `existing_change_id` 机制参加同一任务，但不能凭参与身份代替当前责任租约更新阶段。
-5. 定期 `renew`，不用等待模型完成整段工作才续租。首版没有自动心跳适配器，客户端必须实现续租或主动调用；默认有效期 10 分钟，暂不可配置。完成前报告 verifying，在本地执行测试，再报告 completed。
+5. 定期 `renew`，不用等待模型完成整段工作才续租。手动客户端必须实现续租或主动调用；阶段 B 本地适配器已独立维护续租；默认有效期 10 分钟，暂不可配置。完成前报告 verifying，在本地执行测试，再报告 completed。
 6. 不继续执行时 release。过期任务在下次读取时显示 expired，可被重新 claim；接管增加 epoch。旧租约上报被 `LEASE_REQUIRED` 拒绝。返回的幂等历史响应不证明租约仍有效，重试后应读取当前状态。
 
 认领与依赖校验沿用仓库级事务锁，同一任务只允许一个有效主责任租约；不提供语义去重或文件硬锁。依赖必须同 Project，可跨 Goal，环与自引用被拒绝。依赖任务需报告 completed 才可认领下游；该状态仍为 Agent 报告，不能等同于 Git/CI 事实。暂停/取消/归档禁止新执行与阶段推进（可安全放弃），不终止外部进程。续租本身不授权继续执行被暂停的计划。
@@ -325,7 +325,7 @@ Goal/Project/Milestone 的 `version` 用于并发编辑。Goal 的 objective 或
 
 Project 快照包含 `projects,milestones,goals,changes,available_work`；可用 `project_id` 限定。任务视图附 `dependencies,blocked_reasons,claim,claim_state,available_to_claim`，目标附 `uncovered_criteria,task_count,completed_tasks,progress`。条件映射仅表示定义覆盖；目标的 reported_completed 还要求全体任务报告完成、当前定义版本条件全覆盖且无依赖/重规划阻塞。Milestone 汇总使用相同目标判定，`delivery_state` 固定为 `not_independently_verified`。
 
-当前快照有目标 200、任务 500、协商 200、动态 30 的上限；不是全量统计接口。阶段 B/C 再补分页、容量控制、可靠更新、超时、贡献/集成和正式目标验收。不把测试中格式合法的 fixture SHA 当作真实代码交付。
+当前快照有目标 200、任务 500、协商 200、动态 30 的上限；不是全量统计接口。阶段 B 已补容量控制、可靠更新与超时；分页、贡献/集成和正式目标验收继续演进。不把测试中格式合法的 fixture SHA 当作真实代码交付。
 
 ### 13.4 历史知识
 
@@ -339,4 +339,48 @@ Findings 增加 `failed_attempt/patch_summary`，可附 `detail,conditions,evide
 
 `npm run test:management-ui` 在真实 Chromium 中经 REST 操作规划，测试 fresh workspace、项目授权、里程碑、目标与任务/依赖、认领显示、暂停/筛选/恢复、有效租约下的编辑限制、并发编辑冲突保留输入、引号与 HTML 转义、手机看板。原 MCP 和浏览器协商测试继续运行。
 
-本次并非外部模型持续自主运行实验；客户端唤醒/恢复、自动心跳、缺席超时和 Git/CI 独立事实仍待实现。首次使用可在工作台创建项目与里程碑，登记 ready 目标，再让两个已配置 Agent 读取同一项目自行拆解并认领；系统不会替它们调度模型。
+阶段 A 此次验证并非外部模型持续自主运行实验。阶段 B 后续已有真实客户端、更新/心跳、恢复与超时验证，见第 14 节；Git/CI 独立事实仍待实现。首次使用可在工作台创建项目与里程碑，登记 ready 目标，再让两个已配置 Agent 读取同一项目自行拆解并认领；系统不会替它们调度模型。
+
+## 14. 阶段 B：可靠更新与本地执行适配器
+
+增量迁移 `004_reliable_progression.sql` 添加 `session_runtimes`、`coordination_events`、`event_deliveries`、租约释放原因、Decision 的 `round_deadline_at/deferred_reason`。001～003 保持原样。`domain/reliability.ts` 统一 audit/outbox 发布；service 和 management 在原业务事务中调用，失败时整体回滚。
+
+### Session 和实例
+
+`preflight_manage_session` 的 open 需要 `project_id/instance_id`，不需要先创建任务，返回 Session 和绑定该项目的 runtime。heartbeat/close 使用 `session_id/runtime_id/runtime_epoch`。heartbeat 状态仅 waiting/running；close 可 stopped/error/budget_exhausted，并释放本 Session 租约。
+
+实例 120 秒过期，心跳每 30 秒。recover 需要自己的 Session、新 instance_id 和当前 runtime `expected_version`，原实例必须过期或已关闭；接管递增 epoch。所有受控 Session 的业务写在幂等缓存查找前校验实例；旧实例连已完成请求的重放也被拒绝。幂等业务 hash 排除 runtime 身份字段，合法恢复后使用同一业务请求 ID 可以取回原结果。手动旧 Session 不强制实例字段。
+
+受控 Session 同时最多认领一个主任务；同项目最多两个未过期主责任租约。手动 Session 保留原兼容行为，因此该限制不是整个部署的硬资源隔离。
+
+### 更新消费
+
+`preflight_get_updates` 需要当前 Session/实例，默认 20 条、最多 50 条，先计划变化再按时间/UUID 排序。只返回未确认 delivery，`has_more` 表示需继续消费；没有序号高水位或 cursor，晚提交事务不会被跳过。持续返回同一项直到 ack。
+
+`preflight_ack_updates` 的 `updates[]` 包含 delivery_id、outcome（handled/waiting/stopped/superseded）和可选 observed_version。所有 delivery 必须属于本 Session；重复请求幂等。stopped 必须处于 waiting 且引用该计划事件的 entity_version，来源仍是 adapter_report，不能当作独立外部进程证明。ack 不表示任务完成；waiting 的处理结果保留在投递记录中。
+
+通知只保存项目、实体、版本与状态引用；完整 Findings、提示、源码和 before/after 快照不进入通知 payload。计划/任务变化仅在项目内路由；Findings 路由给同目标及直接下游目标的参与 Session。空闲订阅者靠任务/依赖变化通知与最新快照发现工作。首次订阅和恢复必须读取完整项目快照。心跳与续租不产生模型唤醒广播。
+
+### 维护与协商
+
+服务进程每 5 秒运行维护；每仓库事务 advisory lock，三类扫描分别最多 100 项并按期限排序。只转移仍满足条件的租约、实例和协商记录，重复维护不重复发事件。重启后从数据库期限继续，无需收到下一份 review。写入路径也即时核对期限，正确性不依赖 worker 准时。
+
+within_goal 每轮期限 10 分钟；全体有分歧才推进下一轮并设新期限，三轮不同以 disagreement_limit 隔离。到期且未全体答复以 unanswered_timeout 隔离，保留当前轮次、历史证据与缺席项。主责任接管使仍在 negotiating 的审议 epoch 增加，要求当前责任者重新答复；不延长原 deadline，不撤回已达成结果。managed task 的 review 需要当前主责任 lease_id/lease_epoch。
+
+### Codex 适配器
+
+`adapter/codex.ts` 使用本机 CLI app-server JSONL 接口；`adapter/runtime.ts` 通过官方 MCP SDK 连接 Preflight，把服务端工具作为实验性 dynamic tools 提供给所属会话。默认不改变用户模型配置。CLI 入口为 `npm run agent:start`；参数见 README。Linux/WSL 的 `flock` 保证 journal 本地互斥，PostgreSQL runtime epoch 才是共享状态的身份约束。
+
+journal 用 0600 文件与原子替换/fsync 保存 Session、实例、thread/turn、进程 PID+Linux start time、业务 call 请求 ID、已累计轮次和客户端提供的 token 计数；不保存凭据或原始模型内容。处理动态工具时注入自己的 Session/实例和持久 request ID，不让模型自行改变所属实例。启动最多重试三次；服务或租约失效会中断所属执行并记录 error，不静默伪装正常。
+
+独立心跳/续租与模型调用并行。普通更新排队，到下一轮读取引用的当前状态；计划/定义变化中断当前轮，观察 turn/completed 后切回 waiting 并报告版本化停止结果。暂停/定义过期的主责任随后释放，未完成任务不会标作 completed。等待协商已答复或没有工作时不重复调用模型。预算达到后停止客户端并关闭 runtime，保留未完成工作。
+
+恢复核对原宿主/客户端 PID 与 start time，只终止确定属于该 journal 的原客户端进程组。然后恢复原 thread，若 journal 留有进行中的 turn，则读取持久结果；结果仍未知时拒绝启动重复轮次。外部副作用和无法核实的进程不享有“恰好一次”保证。
+
+### 管理投影与边界
+
+Project/Atlas 增加 `reliability`：每实例心跳、失联标记、未确认数、最早积压、当前计划版本的停止反馈及来源。风险从任务依赖/定义/租约/协商传至 Goal/Milestone，含来源与时间。停止反馈最多 200 条并提供截断标记；未确认总数用聚合查询，不需要把全历史送给模型。工作台保留“执行状态未知”，不推算 ETA 或声称已经交付。
+
+此版没有 SSE、通用客户端调度、自动合并、Git/CI 事实校验、正式 Goal/Milestone 验收、生产审计/队列保留策略或按费用阻断。默认轮询没有自适应 idle 退避/jitter；服务异常以安全停止和后续恢复处理，尚无长期网络故障容错运行。费用无法获得时明确 unavailable；CLI 提供 tokenUsage 时只保存数值。
+
+验证入口：`test:reliability`（实际 PG+SDK）、`test:runtime-faults`（真实本地进程与明确模拟的模型 transport）、`test:management-ui`（真实 Chromium）、`test:client`、`test:agents`、`test:runtime-real`（真实 Codex 模型，使用账号额度）。后两者的结果、异常和限制见[验收记录](testing/reliable-progression-stage-b-2026-10-08.md)。

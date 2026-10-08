@@ -108,13 +108,30 @@ try {
   assert.equal(await page.locator('#goal-milestone').inputValue(), m.id, 'Editing a goal must preserve its historical archived milestone');
   await page.locator('#goal-form .primary').click(); await page.locator('#goal-dialog').waitFor({ state: 'hidden' });
   assert.equal((await service.project(human, p.id)).goals[0]?.milestone_id, m.id);
+  // Stage B projections distinguish plan state, adapter feedback and unknown execution.
+  const opened = await service.execute(agent, 'preflight_manage_session', { request_id: randomUUID(), operation: 'open', project_id: p.id, instance_id: randomUUID() }) as { session: { id: string }; runtime: { instance_id: string; epoch: number } };
+  const runtimeIdentity = { session_id: opened.session.id, runtime_id: opened.runtime.instance_id, runtime_epoch: opened.runtime.epoch };
+  g = (await service.project(human,p.id)).goals[0]!;
+  await service.execute(human,'preflight_manage_goal',{request_id:randomUUID(),goal_id:g.id,expected_version:g.version,plan_state:'paused'});
+  await page.locator('#refresh').click(); await page.locator('#stop-controls').getByText(/执行停止尚未确认/).waitFor();
+  const updates = await service.execute(agent,'preflight_get_updates',runtimeIdentity) as { updates: {delivery_id:string;action:string;entity_version:number}[] };
+  const stop = updates.updates.find(u=>u.action==='goal.updated')!;
+  await service.execute(agent,'preflight_ack_updates',{...runtimeIdentity,request_id:randomUUID(),updates:[{delivery_id:stop.delivery_id,outcome:'stopped',observed_version:stop.entity_version}]});
+  await page.locator('#refresh').click(); await page.locator('#stop-controls').getByText(/适配器报告已停止/).waitFor();
+  await connection.client`UPDATE session_runtimes SET expires_at=now()-interval '1 second' WHERE session_id=${opened.session.id}`;
+  await service.maintain(); await page.locator('#refresh').click(); await page.locator('#runtimes').getByText(/心跳中断，执行状态未知/).waitFor();
+  const proposal = await service.execute(agent,'preflight_propose_decision',{request_id:randomUUID(),change_id:a.id,session_id:work.session_id,question:'Timeout projection',context:'UI timeout fixture',category:'unknown',urgency:'blocking',options:[{label:'A',description:'A'},{label:'B',description:'B'}]}) as {decision:{id:string}};
+  await connection.client`UPDATE decisions SET round_deadline_at=now()-interval '1 second' WHERE id=${proposal.decision.id}`;
+  await service.maintain(); await page.locator('#refresh').click(); await page.getByText(/本轮等待答复已超时/).waitFor();
+  assert.match(await page.locator('#milestones').innerText(),/项风险/);
+  assert.match(await page.locator('#runtime-summary').innerText(),/更新待处理/);
   await mkdir('.preflight/screenshots', { recursive: true }); await page.screenshot({ path: '.preflight/screenshots/planning-desktop.png', fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 }); await page.locator('#work-view').selectOption('board');
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Mobile planning board overflows');
   await page.screenshot({ path: '.preflight/screenshots/planning-mobile.png', fullPage: true });
   assert.equal(await page.locator('#board img, #board svg, #board script').count(), 0); assert.deepEqual(errors, []);
   await page.locator('#logout').click(); await page.locator('#login-panel').waitFor({ state: 'visible' });
-  console.log('✓ Real Chromium: fresh project/delegation/milestone/goal/tasks/dependencies, list/board, live Agent responsibility, pause/filter/resume, leased-task edits rejected, conflict preserves input, quoted XSS escaping, mobile and logout');
+  console.log('✓ Real Chromium: fresh project/delegation/milestone/goal/tasks/dependencies, list/board, live Agent responsibility, pause/filter/resume, leased-task edits rejected, conflict preserves input, quoted XSS escaping, mobile and logout; runtime backlog, unknown/stopped feedback, heartbeat failure, timeout reason and milestone risks');
 } finally {
   await browser?.close(); await new Promise<void>(resolve => server.close(() => resolve())); await connection.client.end();
   await admin.unsafe(`DROP SCHEMA "${schema}" CASCADE`); await admin.end();

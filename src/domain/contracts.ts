@@ -5,7 +5,8 @@ const text = z.string().trim().min(1).max(2000);
 const scope = z.array(z.string().trim().min(1).max(300).refine(p =>
   !p.startsWith('/') && !p.includes('..') && !/(^|\/)\.env($|\.)|\.pem$/i.test(p),
 'Use repository-relative, non-sensitive paths')).max(100);
-const mutation = { request_id: id };
+const runtime = { runtime_id: id.optional(), runtime_epoch: z.number().int().positive().optional() };
+const mutation = { request_id: id, ...runtime };
 export const statusSchema = z.enum(['probable', 'implementing', 'verifying', 'completed', 'abandoned']);
 export const findingSchema = z.object({
   kind: z.enum(['observation', 'hypothesis', 'root_cause', 'constraint', 'test_result', 'failed_attempt', 'patch_summary']),
@@ -59,8 +60,12 @@ export const schemas = {
   }).strict(),
   preflight_review_decision: z.object({ ...mutation,
     change_id: id, session_id: id, decision_id: id, expected_version: z.number().int().positive(),
+    lease_id: id.optional(), lease_epoch: z.number().int().positive().optional(),
     stance: z.enum(['accept', 'object']), option_id: id.optional(), rationale: text, evidence: decisionEvidenceSchema,
   }).strict().refine(data => data.stance !== 'accept' || data.option_id !== undefined, 'Accept requires an option ID'),
+  preflight_manage_session: z.object({ ...mutation, operation: z.enum(['open','recover','heartbeat','close']), project_id: id.optional(), session_id: id.optional(), instance_id: id.optional(), expected_version: z.number().int().positive().optional(), agent_type: text.max(80).default('coding-agent'), state: z.enum(['waiting','running','stopped','error','budget_exhausted']).optional(), capabilities: z.record(z.string(), z.boolean()).optional() }).strict(),
+  preflight_get_updates: z.object({ ...runtime, session_id: id, limit: z.number().int().min(1).max(50).default(20) }).strict(),
+  preflight_ack_updates: z.object({ ...mutation, session_id: id, updates: z.array(z.object({ delivery_id: id, outcome: z.enum(['handled','waiting','stopped','superseded']), observed_version: z.number().int().positive().optional() }).strict()).min(1).max(50) }).strict(),
   preflight_get_project: z.object({ project_id: id.optional() }).strict(),
   preflight_manage_project: z.object({ ...mutation, operation: z.enum(['create','update']), project_id: id.optional(), expected_version: z.number().int().positive().optional(),
     title: text.max(200).optional(), description: z.string().trim().max(2000).optional(), state: z.enum(['active','archived']).optional(), planning_agents: z.array(text.max(100)).max(30).optional() }).strict(),
